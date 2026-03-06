@@ -5,7 +5,7 @@
 //+------------------------------------------------------------------+
 #property copyright "donjai EA"
 #property link      ""
-#property version   "1.00"
+#property version   "1.08"
 
 #include <Trade\Trade.mqh>
 #include <Trade\PositionInfo.mqh>
@@ -33,31 +33,59 @@ enum ENUM_ZZ_SIDE
    ZZ_SELL=-1
   };
 
+enum ENUM_ABCD_SIGNAL
+  {
+   ABCD_NONE=0,
+   ABCD_BUY=1,
+   ABCD_SELL=-1
+  };
+
 //--- Inputs
+input string               InpGroup1                  = "--- Core Settings ---";
 input bool                 InpAutoStart               = true;
 input double               InpStartLot                = 0.10;
 input ENUM_ABCD_START_MODE InpABCDStartMode           = USE_ABCD_ELSE_BUY;
 input int                  InpStepPoints              = 300;
+input int                  InpTimerSeconds            = 1;
+input ulong                InpMagic                   = 20260210;
+
+input string               InpGroup2                  = "--- Lot Progression ---";
 input ENUM_LOT_MODE        InpLotMode                 = LOT_ADD;
 input double               InpLotAdd                  = 0.10;
 input double               InpLotMultiplier           = 2.0;
-input int                  InpMaxCycles               = 0;
+input double               InpFirstOppLot             = 0.0;  // 0 = Auto
+input int                  InpMaxCycles               = 0;    // 0 = No limit
+input double               InpMaxLotLimit             = 0.0;  // 0 = No cap
+input bool                 InpPauseOnMaxLot           = true;
+
+input string               InpGroup3                  = "--- Risk & Money Management ---";
 input bool                 InpCloseAllOnProfit        = false;
 input double               InpProfitTargetMoney       = 50.0;
 input bool                 InpCloseAllOnLoss          = false;
 input double               InpLossLimitMoney          = -200.0;
-input ulong                InpMagic                   = 20260210;
-input int                  InpSidewayMinATRPoints     = 0;
-input double               InpMaxLotLimit             = 0.0;
-input bool                 InpFollowPriceForPending   = false;
-input bool                 InpUseTerminalGlobalVar    = true;
+input int                  InpSL_Points               = 0;
+input int                  InpTP_Points               = 0;
 
+input string               InpGroup4                  = "--- Anti-Sideway & Follow Price ---";
+input int                  InpSidewayMinATRPoints     = 0;
+input int                  InpATRPeriod               = 14;
+input bool                 InpFollowPriceForPending   = false;
+input int                  InpPendingRepriceThresholdPoints = 10;
+
+input string               InpGroup5                  = "--- ZigZag ABCD Signal ---";
 input ENUM_TIMEFRAMES      InpABCDTimeframe           = PERIOD_CURRENT;
 input int                  InpABCDLookbackBars        = 100;
 input int                  InpABCDConfirmBars         = 2;
 input int                  InpABCDMinLegPoints        = 50;
+input int                  InpZigZagDepth             = 12;
+input int                  InpZigZagDeviation         = 5;
+input int                  InpZigZagBackstep          = 3;
+input string               InpZigZagPath              = "Examples\\ZigZag"; 
 
-input int                  InpATRPeriod               = 14;
+input string               InpGroup6                  = "--- System ---";
+input bool                 InpUseTerminalGlobalVar    = true;
+input bool                 InpDebugPrint              = true;
+input bool                 InpLotAddShadowEnabled     = false;
 
 //--- Global Objects
 CTrade         trade;
@@ -77,38 +105,633 @@ int gCycles = 0;
 bool gStarted = false;
 bool gPendingCloseAll = false;
 bool gMarketWasClosed = false;
-ENUM_ZZ_SIDE gAbcdSignal = ZZ_NONE;
+ENUM_ABCD_SIGNAL gAbcdSignal = ABCD_NONE;
 bool gPausedBySideway = false;
 bool gPausedByMaxLot = false;
 
 //+------------------------------------------------------------------+
-//| Expert initialization function                                   |
+//| Utility Functions                                                |
+//+------------------------------------------------------------------+
+void DPrint(string msg) { if(InpDebugPrint) Print(msg); }
+
+string GVBase() { return "ZZH2LV8_" + _Symbol + "_" + IntegerToString(InpMagic) + "_"; }
+
+ulong LotAddShadowMagic() { return InpMagic + 1; }
+
+double NormalizeLot(double lots)
+  {
+   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double min = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double max = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double l = MathRound(lots / step) * step;
+   if(l < min) l = min;
+   if(l > max) l = max;
+   return l;
+  }
+
+double PriceByPoints(double price, int points, bool up)
+  {
+   if(up) return price + (points * _Point);
+   return price - (points * _Point);
+  }
+
+bool IsTradeAllowedNow()
+  {
+   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)) return false;
+   if(!MQLInfoInteger(MQL_TRADE_ALLOWED)) return false;
+   long mode = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE);
+   if(mode == SYMBOL_TRADE_MODE_DISABLED || mode == SYMBOL_TRADE_MODE_CLOSEONLY) return false;
+   if(IsStopped()) return false;
+   return true;
+  }
+
+int PendingRepriceThresholdPts()
+  {
+   if(InpPendingRepriceThresholdPoints > 0) return InpPendingRepriceThresholdPoints;
+   int threshold = InpStepPoints / 5;
+   return threshold < 10 ? 10 : threshold;
+  }
+
+//+------------------------------------------------------------------+
+//| Position & Order Counting Functions                              |
+//+------------------------------------------------------------------+
+int CountPositionsByMagicValue(ulong magic)
+  {
+   int count = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      if(posInfo.SelectByIndex(i))
+         if(posInfo.Magic() == magic && posInfo.Symbol() == _Symbol)
+            count++;
+     }
+   return count;
+  }
+
+int CountPositionsByMagic()
+  {
+   return CountPositionsByMagicValue(InpMagic);
+  }
+
+int CountManagedPositions()
+  {
+   return CountPositionsByMagicValue(InpMagic) + CountPositionsByMagicValue(LotAddShadowMagic());
+  }
+
+bool IsFlatNow()
+  {
+   return CountManagedPositions() == 0;
+  }
+
+double FloatingProfitByMagicValue(ulong magic)
+  {
+   double profit = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      if(posInfo.SelectByIndex(i))
+        {
+         if(posInfo.Magic() == magic && posInfo.Symbol() == _Symbol)
+           {
+            profit += posInfo.Profit() + posInfo.Swap();
+           }
+        }
+     }
+   return profit;
+  }
+
+double FloatingProfitByMagic()
+  {
+   return FloatingProfitByMagicValue(InpMagic) + FloatingProfitByMagicValue(LotAddShadowMagic());
+  }
+
+bool GetLastPosition(ENUM_ZZ_SIDE &side, double &openPrice, double &vol)
+  {
+   ulong lastTicket = 0;
+   bool found = false;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      if(posInfo.SelectByIndex(i))
+        {
+         if(posInfo.Magic() == InpMagic && posInfo.Symbol() == _Symbol)
+           {
+            if(posInfo.Ticket() > lastTicket)
+              {
+               lastTicket = posInfo.Ticket();
+               side = (posInfo.PositionType() == POSITION_TYPE_BUY) ? ZZ_BUY : ZZ_SELL;
+               openPrice = posInfo.PriceOpen();
+               vol = posInfo.Volume();
+               found = true;
+              }
+           }
+        }
+     }
+   return found;
+  }
+
+bool PendingExistsByMagic(long wantType, ulong magic, ulong &ticket, double &price)
+  {
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      ulong t = OrderGetTicket(i);
+      if(OrderSelect(t))
+        {
+         if(OrderGetInteger(ORDER_MAGIC) == magic && OrderGetString(ORDER_SYMBOL) == _Symbol)
+           {
+            if(OrderGetInteger(ORDER_TYPE) == wantType)
+              {
+               ticket = t;
+               price = OrderGetDouble(ORDER_PRICE_OPEN);
+               return true;
+              }
+           }
+        }
+     }
+   return false;
+  }
+
+bool PendingExists(long wantType, ulong &ticket, double &price)
+  {
+   return PendingExistsByMagic(wantType, InpMagic, ticket, price);
+  }
+
+//+------------------------------------------------------------------+
+//| Close & Cancel Functions                                         |
+//+------------------------------------------------------------------+
+void CancelAllPendingsByMagicValue(ulong magic)
+  {
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = OrderGetTicket(i);
+      if(OrderSelect(ticket))
+        {
+         if(OrderGetInteger(ORDER_MAGIC) == magic && OrderGetString(ORDER_SYMBOL) == _Symbol)
+           {
+            trade.OrderDelete(ticket);
+           }
+        }
+     }
+  }
+
+void CancelAllPendingsByMagic()
+  {
+   CancelAllPendingsByMagicValue(InpMagic);
+  }
+
+void CancelAllManagedPendings()
+  {
+   CancelAllPendingsByMagicValue(InpMagic);
+   CancelAllPendingsByMagicValue(LotAddShadowMagic());
+  }
+
+void CloseAllPositionsByMagicValue(ulong magic)
+  {
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      if(posInfo.SelectByIndex(i))
+        {
+         if(posInfo.Magic() == magic && posInfo.Symbol() == _Symbol)
+           {
+            trade.PositionClose(posInfo.Ticket());
+           }
+        }
+     }
+  }
+
+void CloseAllManagedPositions()
+  {
+   CloseAllPositionsByMagicValue(InpMagic);
+   CloseAllPositionsByMagicValue(LotAddShadowMagic());
+  }
+
+void ResetSequenceStateIfFlat(string reason)
+  {
+   if(!IsFlatNow()) return;
+   CancelAllManagedPendings();
+   gStarted = false;
+   gCycles = 0;
+   gLastTriggered = ZZ_NONE;
+   gUpperPrice = 0.0;
+   gLowerPrice = 0.0;
+   gNextLot = InpStartLot;
+   gPendingCloseAll = false;
+   gPausedByMaxLot = false;
+   DPrint("Sequence reset: " + reason);
+   SaveState();
+  }
+
+void HandleMarketOpenClose()
+  {
+   bool isOpen = (SymbolInfoDouble(_Symbol, SYMBOL_ASK) > 0 && SymbolInfoDouble(_Symbol, SYMBOL_BID) > 0);
+   if(!isOpen && !gMarketWasClosed)
+     {
+      DPrint("Market closed.");
+      gMarketWasClosed = true;
+     }
+   else if(isOpen && gMarketWasClosed)
+     {
+      DPrint("Market reopened.");
+      gMarketWasClosed = false;
+      if(IsFlatNow()) ResetSequenceStateIfFlat("Market Reopen");
+      else if(gPendingCloseAll) CheckProfitLossCloseAll();
+      else RebuildFromExisting();
+     }
+  }
+
+void RebuildFromExisting()
+  {
+   int count = CountPositionsByMagic();
+   if(count > 0)
+     {
+      ENUM_ZZ_SIDE side;
+      double openPrice, vol;
+      if(GetLastPosition(side, openPrice, vol))
+        {
+         // Find Upper/Lower from existing rules
+         if(side == ZZ_BUY)
+           {
+            gUpperPrice = openPrice;
+            gLowerPrice = gUpperPrice - (InpStepPoints * _Point);
+           }
+         else
+           {
+            gLowerPrice = openPrice;
+            gUpperPrice = gLowerPrice + (InpStepPoints * _Point);
+           }
+         gLastTriggered = side;
+         gNextLot = GetNextLot(vol);
+         gStarted = true;
+         SaveState();
+         MaintainOppositePending();
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Anti-Sideway & ATR Guard                                         |
+//+------------------------------------------------------------------+
+void EnsureAtrHandle()
+  {
+   if(atrHandle == INVALID_HANDLE)
+      atrHandle = iATR(_Symbol, PERIOD_CURRENT, InpATRPeriod);
+  }
+
+double CurrentATRPoints()
+  {
+   EnsureAtrHandle();
+   if(atrHandle == INVALID_HANDLE) return 0;
+   double atr[];
+   if(CopyBuffer(atrHandle, 0, 1, 1, atr) > 0)
+      return atr[0] / _Point;
+   return 0;
+  }
+
+bool IsSidewayNow()
+  {
+   if(InpSidewayMinATRPoints <= 0) return false;
+   double atrPts = CurrentATRPoints();
+   bool isSideway = (atrPts < InpSidewayMinATRPoints && atrPts > 0);
+   if(isSideway && !gPausedBySideway) DPrint("Entered Sideway Mode (ATR: " + DoubleToString(atrPts, 1) + ")");
+   if(!isSideway && gPausedBySideway) DPrint("Exited Sideway Mode");
+   gPausedBySideway = isSideway;
+   return isSideway;
+  }
+
+//+------------------------------------------------------------------+
+//| ABCD Structure-Break Signal (ZigZag)                             |
+//+------------------------------------------------------------------+
+void EnsureZigZagHandle()
+  {
+   if(zigzagHandle == INVALID_HANDLE)
+      zigzagHandle = iCustom(_Symbol, InpABCDTimeframe, InpZigZagPath, InpZigZagDepth, InpZigZagDeviation, InpZigZagBackstep);
+  }
+
+void UpdateAbcdSignalIfNeeded()
+  {
+   // Throttle to avoid heavy calculation every tick
+   static datetime lastBar = 0;
+   datetime currentBar = (datetime)SeriesInfoInteger(_Symbol, InpABCDTimeframe, SERIES_LASTBAR_DATE);
+   if(currentBar == lastBar && InpABCDStartMode == USE_ABCD_ELSE_BUY) return;
+   lastBar = currentBar;
+
+   if(InpABCDStartMode == ALWAYS_BUY) { gAbcdSignal = ABCD_BUY; return; }
+   if(InpABCDStartMode == ALWAYS_SELL) { gAbcdSignal = ABCD_SELL; return; }
+   
+   EnsureZigZagHandle();
+   if(zigzagHandle == INVALID_HANDLE) 
+     {
+      gAbcdSignal = (InpABCDStartMode == STRICT_ABCD) ? ABCD_NONE : ABCD_BUY;
+      return;
+     }
+
+   double zz[];
+   if(CopyBuffer(zigzagHandle, 0, InpABCDConfirmBars, InpABCDLookbackBars, zz) <= 0) return;
+   
+   // Find last 4 pivots
+   double pivots[4];
+   int pCount = 0;
+   for(int i = ArraySize(zz) - 1; i >= 0 && pCount < 4; i--)
+     {
+      if(zz[i] > 0)
+        {
+         pivots[pCount] = zz[i];
+         pCount++;
+        }
+     }
+     
+   if(pCount < 4) 
+     {
+      gAbcdSignal = (InpABCDStartMode == STRICT_ABCD) ? ABCD_NONE : ABCD_BUY;
+      return;
+     }
+
+   double D = pivots[0]; // Newest
+   double C = pivots[1];
+   double B = pivots[2];
+   double A = pivots[3]; // Oldest
+
+   double minLeg = InpABCDMinLegPoints * _Point;
+   
+   // Bullish: A(high) -> B(low) -> C(lower high) -> D(lower low) -> wait, Bullish break means price goes UP after D
+   // Actually, standard ABCD Bullish: down -> up -> down -> breaking up?
+   // Let's implement a simple structure detector
+   bool isBullish = (A > B && C > B && C < A && D < C && D < B);
+   bool isBearish = (A < B && C < B && C > A && D > C && D > B);
+
+   if(isBullish && MathAbs(A-B)>minLeg && MathAbs(C-B)>minLeg && MathAbs(C-D)>minLeg)
+      gAbcdSignal = ABCD_BUY;
+   else if(isBearish && MathAbs(B-A)>minLeg && MathAbs(B-C)>minLeg && MathAbs(D-C)>minLeg)
+      gAbcdSignal = ABCD_SELL;
+   else
+      gAbcdSignal = (InpABCDStartMode == STRICT_ABCD) ? ABCD_NONE : ABCD_BUY;
+  }
+
+//+------------------------------------------------------------------+
+//| Lot Progression                                                  |
+//+------------------------------------------------------------------+
+void ApplyMaxLotLimit(double &lots, bool &exceeded)
+  {
+   exceeded = false;
+   if(InpMaxLotLimit > 0 && lots > InpMaxLotLimit)
+     {
+      lots = InpMaxLotLimit;
+      exceeded = true;
+     }
+  }
+
+double GetNextLot(double lastVol)
+  {
+   double nextLot = lastVol;
+   if(InpLotMode == LOT_ADD) nextLot += InpLotAdd;
+   else if(InpLotMode == LOT_MUL) nextLot *= InpLotMultiplier;
+   
+   bool exceeded;
+   ApplyMaxLotLimit(nextLot, exceeded);
+   if(exceeded && InpPauseOnMaxLot) gPausedByMaxLot = true;
+     
+   return NormalizeLot(nextLot);
+  }
+
+double GetFirstOppLot()
+  {
+   if(InpFirstOppLot > 0) return NormalizeLot(InpFirstOppLot);
+   double firstOppLot = InpStartLot;
+   if(InpLotMode == LOT_ADD) firstOppLot += InpLotAdd;
+   else if(InpLotMode == LOT_MUL) firstOppLot *= InpLotMultiplier;
+   return NormalizeLot(firstOppLot);
+  }
+
+//+------------------------------------------------------------------+
+//| SL / TP                                                          |
+//+------------------------------------------------------------------+
+void ApplySLTPForOpenedPosition(ENUM_ZZ_SIDE side, double openPrice, ulong ticket)
+  {
+   if(InpSL_Points == 0 && InpTP_Points == 0) return;
+   
+   double sl = 0, tp = 0;
+   if(side == ZZ_BUY)
+     {
+      if(InpSL_Points > 0) sl = openPrice - (InpSL_Points * _Point);
+      if(InpTP_Points > 0) tp = openPrice + (InpTP_Points * _Point);
+     }
+   else if(side == ZZ_SELL)
+     {
+      if(InpSL_Points > 0) sl = openPrice + (InpSL_Points * _Point);
+      if(InpTP_Points > 0) tp = openPrice - (InpTP_Points * _Point);
+     }
+     
+   trade.PositionModify(ticket, sl, tp);
+  }
+
+//+------------------------------------------------------------------+
+//| Core Trading Logic                                               |
+//+------------------------------------------------------------------+
+double DesiredOppositePendingPrice(ENUM_ZZ_SIDE lastSide)
+  {
+   if(!InpFollowPriceForPending)
+      return (lastSide == ZZ_BUY) ? gLowerPrice : gUpperPrice;
+      
+   symInfo.RefreshRates();
+   if(lastSide == ZZ_BUY)
+      return symInfo.Bid() - (InpStepPoints * _Point);
+   else
+      return symInfo.Ask() + (InpStepPoints * _Point);
+  }
+
+void PlaceOppositeStop(ENUM_ZZ_SIDE lastSide, double lots)
+  {
+   if(!IsTradeAllowedNow()) return;
+   if(IsSidewayNow()) return; // ZZH2L_MaintainSidewayCounterOrders handles sideway instead
+   if(gPausedByMaxLot) return;
+   
+   lots = NormalizeLot(lots);
+   long wantType = (lastSide == ZZ_BUY) ? ORDER_TYPE_SELL_STOP : ORDER_TYPE_BUY_STOP;
+   
+   // Sync pending logic
+   ulong existingTicket; double existingPrice;
+   if(PendingExists(wantType, existingTicket, existingPrice))
+     {
+      double desiredPrice = DesiredOppositePendingPrice(lastSide);
+      if(MathAbs(existingPrice - desiredPrice) / _Point > PendingRepriceThresholdPts())
+        {
+         trade.OrderModify(existingTicket, desiredPrice, 0, 0, ORDER_TIME_GTC, 0);
+        }
+      return;
+     }
+
+   // Place new
+   CancelAllPendingsByMagic(); // Clean duplicate/wrong types
+   symInfo.RefreshRates();
+   
+   if(lastSide == ZZ_BUY)
+     {
+      double price = DesiredOppositePendingPrice(lastSide);
+      if(symInfo.Bid() > price)
+         trade.SellStop(lots, price, _Symbol, 0, 0, ORDER_TIME_GTC, 0, "Opposite Sell Stop");
+      else
+         trade.Sell(lots, _Symbol, symInfo.Bid(), 0, 0, "Fast Trigger Sell"); // Safety if dropped fast
+     }
+   else if(lastSide == ZZ_SELL)
+     {
+      double price = DesiredOppositePendingPrice(lastSide);
+      if(symInfo.Ask() < price)
+         trade.BuyStop(lots, price, _Symbol, 0, 0, ORDER_TIME_GTC, 0, "Opposite Buy Stop");
+      else
+         trade.Buy(lots, _Symbol, symInfo.Ask(), 0, 0, "Fast Trigger Buy"); // Safety if spiked fast
+     }
+  }
+
+void StartSequence()
+  {
+   if(!IsTradeAllowedNow()) return;
+   if(IsSidewayNow()) return;
+   
+   UpdateAbcdSignalIfNeeded();
+   if(gAbcdSignal == ABCD_NONE) return;
+   
+   symInfo.RefreshRates();
+   double ask = symInfo.Ask();
+   double bid = symInfo.Bid();
+   
+   if(gAbcdSignal == ABCD_BUY)
+     {
+      gUpperPrice = ask;
+      gLowerPrice = ask - (InpStepPoints * _Point);
+      if(trade.Buy(InpStartLot, _Symbol, ask, 0, 0, "Sequence Start Buy"))
+        {
+         gLastTriggered = ZZ_BUY;
+         gNextLot = GetFirstOppLot();
+         gCycles = 1;
+         PlaceOppositeStop(ZZ_BUY, gNextLot);
+        }
+     }
+   else if(gAbcdSignal == ABCD_SELL)
+     {
+      gLowerPrice = bid;
+      gUpperPrice = bid + (InpStepPoints * _Point);
+      if(trade.Sell(InpStartLot, _Symbol, bid, 0, 0, "Sequence Start Sell"))
+        {
+         gLastTriggered = ZZ_SELL;
+         gNextLot = GetFirstOppLot();
+         gCycles = 1;
+         PlaceOppositeStop(ZZ_SELL, gNextLot);
+        }
+     }
+     
+   gStarted = true;
+   SaveState();
+  }
+
+void MaintainOppositePending()
+  {
+   if(IsFlatNow()) 
+     {
+      if(gStarted) ResetSequenceStateIfFlat("Flat detected in Maintain");
+      return;
+     }
+   if(IsSidewayNow())
+     {
+      CancelAllPendingsByMagic();
+      // ZZH2L_MaintainSidewayCounterOrders() logic would go here.
+      // Mockup for Sideway limits
+      if(InpLotAddShadowEnabled) PlaceSidewayLimitsMockup();
+      return;
+     }
+   if(gPausedByMaxLot)
+     {
+      CancelAllPendingsByMagic();
+      return;
+     }
+     
+   if(gLastTriggered != ZZ_NONE && gNextLot > 0)
+     {
+      PlaceOppositeStop(gLastTriggered, gNextLot);
+     }
+     
+   // Delete duplicates
+   int pendingCount = 0;
+   ulong lastTicket = 0;
+   for(int i = OrdersTotal() - 1; i >=0 ; i--)
+     {
+      ulong ticket = OrderGetTicket(i);
+      if(OrderSelect(ticket))
+        {
+         if(OrderGetInteger(ORDER_MAGIC) == InpMagic && OrderGetString(ORDER_SYMBOL) == _Symbol)
+           {
+            pendingCount++;
+            if(pendingCount > 1) trade.OrderDelete(ticket); // delete older duplicates
+            else lastTicket = ticket;
+           }
+        }
+     }
+  }
+
+void PlaceSidewayLimitsMockup()
+  {
+   // In sideway, cancel stops and place limits instead using ShadowMagic
+   ulong tic; double prc;
+   if(gLastTriggered == ZZ_BUY && !PendingExistsByMagic(ORDER_TYPE_BUY_LIMIT, LotAddShadowMagic(), tic, prc))
+     {
+      symInfo.RefreshRates();
+      double price = gLowerPrice;
+      if(symInfo.Ask() > price) trade.BuyLimit(gNextLot, price, _Symbol, 0, 0, ORDER_TIME_GTC, 0, "Shadow Buy Limit");
+     }
+   else if(gLastTriggered == ZZ_SELL && !PendingExistsByMagic(ORDER_TYPE_SELL_LIMIT, LotAddShadowMagic(), tic, prc))
+     {
+      symInfo.RefreshRates();
+      double price = gUpperPrice;
+      if(symInfo.Bid() < price) trade.SellLimit(gNextLot, price, _Symbol, 0, 0, ORDER_TIME_GTC, 0, "Shadow Sell Limit");
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Risk Management                                                  |
+//+------------------------------------------------------------------+
+void CheckProfitLossCloseAll()
+  {
+   if(!InpCloseAllOnProfit && !InpCloseAllOnLoss) return;
+   
+   double totalFloat = FloatingProfitByMagic();
+   
+   bool closeCondition = false;
+   if(InpCloseAllOnProfit && totalFloat >= InpProfitTargetMoney) closeCondition = true;
+   if(InpCloseAllOnLoss && totalFloat <= InpLossLimitMoney) closeCondition = true;
+   
+   if(closeCondition)
+     {
+      if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
+        {
+         gPendingCloseAll = true;
+         return;
+        }
+        
+      CancelAllManagedPendings();
+      CloseAllManagedPositions();
+      gPendingCloseAll = false;
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Main Events                                                      |
 //+------------------------------------------------------------------+
 int OnInit()
   {
    symInfo.Name(_Symbol);
    trade.SetExpertMagicNumber(InpMagic);
    
-   atrHandle = iATR(_Symbol, PERIOD_CURRENT, InpATRPeriod);
-   
-   if(InpUseTerminalGlobalVar)
-     LoadState();
+   if(InpUseTerminalGlobalVar) LoadState();
      
-   if(IsFlatNow())
-     ResetSequenceStateIfFlat("OnInit: flat");
+   if(IsFlatNow()) ResetSequenceStateIfFlat("OnInit: flat");
+   else RebuildFromExisting();
      
-   EventSetTimer(1); // Timer every 1 second
+   EventSetTimer(InpTimerSeconds);
    
-   if(InpAutoStart && !gStarted)
-     StartSequence();
+   if(InpAutoStart && !gStarted) StartSequence();
      
    return(INIT_SUCCEEDED);
   }
 
 void OnDeinit(const int reason)
   {
-   if(InpUseTerminalGlobalVar)
-     SaveState();
+   if(InpUseTerminalGlobalVar) SaveState();
    EventKillTimer();
    if(zigzagHandle != INVALID_HANDLE) IndicatorRelease(zigzagHandle);
    if(atrHandle != INVALID_HANDLE) IndicatorRelease(atrHandle);
@@ -120,8 +743,7 @@ void OnTimer()
    if(IsFlatNow()) ResetSequenceStateIfFlat("OnTimer: flat");
    UpdateAbcdSignalIfNeeded();
    
-   if(gPendingCloseAll)
-      CheckProfitLossCloseAll(); // Retry close
+   if(gPendingCloseAll) CheckProfitLossCloseAll();
       
    MaintainOppositePending();
   }
@@ -134,14 +756,14 @@ void OnTick()
    if(IsFlatNow()) ResetSequenceStateIfFlat("OnTick: flat");
    UpdateAbcdSignalIfNeeded();
    
-   if(InpAutoStart && IsFlatNow())
+   if(InpAutoStart && IsFlatNow() && !gStarted)
       StartSequence();
       
    if(gPendingCloseAll) return;
    
    if(InpMaxCycles > 0 && gCycles >= InpMaxCycles)
      {
-      CancelAllPendings();
+      CancelAllManagedPendings();
       CheckProfitLossCloseAll();
      }
      
@@ -163,16 +785,20 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
               {
                long type = HistoryDealGetInteger(ticket, DEAL_TYPE);
                double vol = HistoryDealGetDouble(ticket, DEAL_VOLUME);
+               double price = HistoryDealGetDouble(ticket, DEAL_PRICE);
+               ulong posTicket = HistoryDealGetInteger(ticket, DEAL_POSITION_ID);
                
                if(type == DEAL_TYPE_BUY) gLastTriggered = ZZ_BUY;
                else if(type == DEAL_TYPE_SELL) gLastTriggered = ZZ_SELL;
                
                gCycles++;
+               ApplySLTPForOpenedPosition(gLastTriggered, price, posTicket);
+               
                gNextLot = GetNextLot(vol);
                
                if(InpMaxCycles > 0 && gCycles >= InpMaxCycles)
                  {
-                  CancelAllPendings();
+                  CancelAllPendingsByMagic();
                   SaveState();
                   return;
                  }
@@ -186,270 +812,15 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
   }
 
 //+------------------------------------------------------------------+
-//| Core Logic Functions                                             |
-//+------------------------------------------------------------------+
-
-bool IsFlatNow()
-  {
-   return CountPositionsByMagic() == 0;
-  }
-
-int CountPositionsByMagic()
-  {
-   int count = 0;
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-     {
-      if(posInfo.SelectByIndex(i))
-        {
-         if(posInfo.Magic() == InpMagic && posInfo.Symbol() == _Symbol)
-            count++;
-        }
-     }
-   return count;
-  }
-
-void ResetSequenceStateIfFlat(string reason)
-  {
-   CancelAllPendings();
-   gStarted = false;
-   gCycles = 0;
-   gLastTriggered = ZZ_NONE;
-   gUpperPrice = 0.0;
-   gLowerPrice = 0.0;
-   gNextLot = InpStartLot;
-   gPendingCloseAll = false;
-  }
-
-void HandleMarketOpenClose()
-  {
-   // Basic mockup for session checks
-   bool isOpen = (SymbolInfoInteger(_Symbol, SYMBOL_SESSION_DEALS) > 0);
-   if(!isOpen && !gMarketWasClosed)
-     {
-      Print("Market closed.");
-      gMarketWasClosed = true;
-     }
-   else if(isOpen && gMarketWasClosed)
-     {
-      gMarketWasClosed = false;
-      if(IsFlatNow()) ResetSequenceStateIfFlat("Market Reopen");
-      else if(gPendingCloseAll) CheckProfitLossCloseAll();
-     }
-  }
-
-void UpdateAbcdSignalIfNeeded()
-  {
-   // For now, simplified logic indicating direction
-   if(gAbcdSignal == ZZ_NONE)
-     {
-      if(InpABCDStartMode == ALWAYS_BUY) gAbcdSignal = ZZ_BUY;
-      else if(InpABCDStartMode == ALWAYS_SELL) gAbcdSignal = ZZ_SELL;
-      else gAbcdSignal = ZZ_BUY; // Default simplified
-     }
-  }
-
-double GetNextLot(double lastVol)
-  {
-   double nextLot = lastVol;
-   if(InpLotMode == LOT_ADD) nextLot += InpLotAdd;
-   else if(InpLotMode == LOT_MUL) nextLot *= InpLotMultiplier;
-   
-   if(InpMaxLotLimit > 0 && nextLot > InpMaxLotLimit)
-     {
-      nextLot = InpMaxLotLimit;
-      gPausedByMaxLot = true;
-     }
-     
-   return NormalizeLot(nextLot);
-  }
-
-double NormalizeLot(double lots)
-  {
-   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-   double min = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-   double max = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-   double l = MathRound(lots / step) * step;
-   if(l < min) l = min;
-   if(l > max) l = max;
-   return l;
-  }
-
-void PlaceOppositeStop(ENUM_ZZ_SIDE lastSide, double lots)
-  {
-   if(!symInfo.RefreshRates()) return;
-   
-   if(IsSidewayNow()) return;
-   if(gPausedByMaxLot) return;
-   
-   lots = NormalizeLot(lots);
-   
-   if(lastSide == ZZ_BUY)
-     {
-      double price = gLowerPrice > 0 ? gLowerPrice : symInfo.Bid() - (InpStepPoints * _Point);
-      if(symInfo.Bid() > price)
-        {
-         trade.SellStop(lots, price, _Symbol, 0, 0, ORDER_TIME_GTC, 0, "Opposite Sell Stop");
-        }
-     }
-   else if(lastSide == ZZ_SELL)
-     {
-      double price = gUpperPrice > 0 ? gUpperPrice : symInfo.Ask() + (InpStepPoints * _Point);
-      if(symInfo.Ask() < price)
-        {
-         trade.BuyStop(lots, price, _Symbol, 0, 0, ORDER_TIME_GTC, 0, "Opposite Buy Stop");
-        }
-     }
-  }
-
-void StartSequence()
-  {
-   if(!symInfo.RefreshRates()) return;
-   if(IsSidewayNow()) return;
-   
-   UpdateAbcdSignalIfNeeded();
-   
-   double ask = symInfo.Ask();
-   double bid = symInfo.Bid();
-   
-   if(gAbcdSignal == ZZ_BUY)
-     {
-      gUpperPrice = ask;
-      gLowerPrice = ask - (InpStepPoints * _Point);
-      trade.Buy(InpStartLot, _Symbol, ask, 0, 0, "Sequence Start Buy");
-     }
-   else if(gAbcdSignal == ZZ_SELL)
-     {
-      gLowerPrice = bid;
-      gUpperPrice = bid + (InpStepPoints * _Point);
-      trade.Sell(InpStartLot, _Symbol, bid, 0, 0, "Sequence Start Sell");
-     }
-     
-   gStarted = true;
-   SaveState();
-  }
-
-void MaintainOppositePending()
-  {
-   if(IsFlatNow()) return;
-   if(IsSidewayNow())
-     {
-      CancelAllPendings();
-      return;
-     }
-   if(gPausedByMaxLot)
-     {
-      CancelAllPendings();
-      return;
-     }
-     
-   int pendingCount = 0;
-   for(int i = OrdersTotal() - 1; i >=0 ; i--)
-     {
-      ulong ticket = OrderGetTicket(i);
-      if(OrderSelect(ticket))
-        {
-         if(OrderGetInteger(ORDER_MAGIC) == InpMagic && OrderGetString(ORDER_SYMBOL) == _Symbol)
-            pendingCount++;
-        }
-     }
-     
-   if(pendingCount == 0 && gLastTriggered != ZZ_NONE && gNextLot > 0)
-     {
-      PlaceOppositeStop(gLastTriggered, gNextLot);
-     }
-  }
-
-void CancelAllPendings()
-  {
-   for(int i = OrdersTotal() - 1; i >= 0; i--)
-     {
-      ulong ticket = OrderGetTicket(i);
-      if(OrderSelect(ticket))
-        {
-         if(OrderGetInteger(ORDER_MAGIC) == InpMagic && OrderGetString(ORDER_SYMBOL) == _Symbol)
-           {
-            trade.OrderDelete(ticket);
-           }
-        }
-     }
-  }
-
-void CheckProfitLossCloseAll()
-  {
-   if(!InpCloseAllOnProfit && !InpCloseAllOnLoss) return;
-   
-   double totalFloat = FloatingProfitByMagic();
-   
-   bool closeCondition = false;
-   if(InpCloseAllOnProfit && totalFloat >= InpProfitTargetMoney) closeCondition = true;
-   if(InpCloseAllOnLoss && totalFloat <= InpLossLimitMoney) closeCondition = true;
-   
-   if(closeCondition)
-     {
-      CancelAllPendings();
-      for(int i = PositionsTotal() - 1; i >= 0; i--)
-        {
-         if(posInfo.SelectByIndex(i))
-           {
-            if(posInfo.Magic() == InpMagic && posInfo.Symbol() == _Symbol)
-              {
-               trade.PositionClose(posInfo.Ticket());
-              }
-           }
-        }
-      gPendingCloseAll = false;
-     }
-  }
-
-double FloatingProfitByMagic()
-  {
-   double profit = 0;
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-     {
-      if(posInfo.SelectByIndex(i))
-        {
-         if(posInfo.Magic() == InpMagic && posInfo.Symbol() == _Symbol)
-           {
-            profit += posInfo.Profit() + posInfo.Swap();
-           }
-        }
-     }
-   return profit;
-  }
-
-bool IsSidewayNow()
-  {
-   if(InpSidewayMinATRPoints <= 0) return false;
-   if(atrHandle == INVALID_HANDLE) return false;
-   double atr[];
-   if(CopyBuffer(atrHandle, 0, 1, 1, atr) > 0)
-     {
-      double atrPts = atr[0] / _Point;
-      if(atrPts < InpSidewayMinATRPoints)
-        {
-         gPausedBySideway = true;
-         return true;
-        }
-     }
-   gPausedBySideway = false;
-   return false;
-  }
-
-//+------------------------------------------------------------------+
 //| State Persistence                                                |
 //+------------------------------------------------------------------+
-string GVBase()
-  {
-   return "ZZH2LV8_" + _Symbol + "_" + IntegerToString(InpMagic) + "_";
-  }
-
 void SaveState()
   {
    if(!InpUseTerminalGlobalVar) return;
    GlobalVariableSet(GVBase() + "upper", gUpperPrice);
    GlobalVariableSet(GVBase() + "lower", gLowerPrice);
    GlobalVariableSet(GVBase() + "nextlot", gNextLot);
-   GlobalVariableSet(GVBase() + "cycles", gCycles);
+   GlobalVariableSet(GVBase() + "cycles", (double)gCycles);
    GlobalVariableSet(GVBase() + "last", (double)gLastTriggered);
    GlobalVariableSet(GVBase() + "started", gStarted ? 1.0 : 0.0);
    GlobalVariableSet(GVBase() + "pclose", gPendingCloseAll ? 1.0 : 0.0);
@@ -458,7 +829,6 @@ void SaveState()
 void LoadState()
   {
    if(!InpUseTerminalGlobalVar) return;
-   
    if(GlobalVariableCheck(GVBase() + "upper")) gUpperPrice = GlobalVariableGet(GVBase() + "upper");
    if(GlobalVariableCheck(GVBase() + "lower")) gLowerPrice = GlobalVariableGet(GVBase() + "lower");
    if(GlobalVariableCheck(GVBase() + "nextlot")) gNextLot = GlobalVariableGet(GVBase() + "nextlot");
