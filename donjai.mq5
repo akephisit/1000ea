@@ -87,6 +87,10 @@ input bool                 InpUseTerminalGlobalVar    = true;
 input bool                 InpDebugPrint              = true;
 input bool                 InpLotAddShadowEnabled     = false;
 
+input string               InpGroup7                  = "--- Shadow & Trailing Module ---";
+input int                  InpShadowTrailingStopPoints= 50;
+input int                  InpShadowTrailingStepPoints= 10;
+
 //--- Global Objects
 CTrade         trade;
 CPositionInfo  posInfo;
@@ -658,9 +662,7 @@ void MaintainOppositePending()
    if(IsSidewayNow())
      {
       CancelAllPendingsByMagic();
-      // ZZH2L_MaintainSidewayCounterOrders() logic would go here.
-      // Mockup for Sideway limits
-      if(InpLotAddShadowEnabled) PlaceSidewayLimitsMockup();
+      if(InpLotAddShadowEnabled) ZZH2L_MaintainSidewayCounterOrders();
       return;
      }
    if(gPausedByMaxLot)
@@ -692,21 +694,70 @@ void MaintainOppositePending()
      }
   }
 
-void PlaceSidewayLimitsMockup()
+void ZZH2L_MaintainSidewayCounterOrders()
   {
-   // In sideway, cancel stops and place limits instead using ShadowMagic
+   // In sideway, place limits instead using ShadowMagic
    ulong tic; double prc;
    if(gLastTriggered == ZZ_BUY && !PendingExistsByMagic(ORDER_TYPE_BUY_LIMIT, LotAddShadowMagic(), tic, prc))
      {
       symInfo.RefreshRates();
       double price = gLowerPrice;
-      if(symInfo.Ask() > price) trade.BuyLimit(gNextLot, price, _Symbol, 0, 0, ORDER_TIME_GTC, 0, "Shadow Buy Limit");
+      if(symInfo.Ask() > price) trade.BuyLimit(gNextLot, price, _Symbol, 0, 0, ORDER_TIME_GTC, 0, "Shadow Buy Limit (Sideway)");
+      else trade.Buy(gNextLot, _Symbol, symInfo.Ask(), 0, 0, "Shadow Buy Triggered");
      }
    else if(gLastTriggered == ZZ_SELL && !PendingExistsByMagic(ORDER_TYPE_SELL_LIMIT, LotAddShadowMagic(), tic, prc))
      {
       symInfo.RefreshRates();
       double price = gUpperPrice;
-      if(symInfo.Bid() < price) trade.SellLimit(gNextLot, price, _Symbol, 0, 0, ORDER_TIME_GTC, 0, "Shadow Sell Limit");
+      if(symInfo.Bid() < price) trade.SellLimit(gNextLot, price, _Symbol, 0, 0, ORDER_TIME_GTC, 0, "Shadow Sell Limit (Sideway)");
+      else trade.Sell(gNextLot, _Symbol, symInfo.Bid(), 0, 0, "Shadow Sell Triggered");
+     }
+  }
+
+void ZZH2L_ManageLotAddTrailingStop()
+  {
+   if(!InpLotAddShadowEnabled) return;
+   if(InpShadowTrailingStopPoints <= 0) return;
+   
+   symInfo.RefreshRates();
+   double bid = symInfo.Bid();
+   double ask = symInfo.Ask();
+   
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      if(posInfo.SelectByIndex(i))
+        {
+         if(posInfo.Magic() == LotAddShadowMagic() && posInfo.Symbol() == _Symbol)
+           {
+            ulong t = posInfo.Ticket();
+            double openPrice = posInfo.PriceOpen();
+            double sl = posInfo.StopLoss();
+            double tp = posInfo.TakeProfit();
+            
+            if(posInfo.PositionType() == POSITION_TYPE_BUY)
+              {
+               if(bid - openPrice > InpShadowTrailingStopPoints * _Point)
+                 {
+                  double newsl = bid - (InpShadowTrailingStopPoints * _Point);
+                  if(sl == 0.0 || newsl > sl + (InpShadowTrailingStepPoints * _Point))
+                    {
+                     trade.PositionModify(t, newsl, tp);
+                    }
+                 }
+              }
+            else if(posInfo.PositionType() == POSITION_TYPE_SELL)
+              {
+               if(openPrice - ask > InpShadowTrailingStopPoints * _Point)
+                 {
+                  double newsl = ask + (InpShadowTrailingStopPoints * _Point);
+                  if(sl == 0.0 || newsl < sl - (InpShadowTrailingStepPoints * _Point))
+                    {
+                     trade.PositionModify(t, newsl, tp);
+                    }
+                 }
+              }
+           }
+        }
      }
   }
 
@@ -771,6 +822,8 @@ void OnTimer()
    if(IsFlatNow()) ResetSequenceStateIfFlat("OnTimer: flat");
    UpdateAbcdSignalIfNeeded();
    
+   ZZH2L_ManageLotAddTrailingStop();
+   
    if(gPendingCloseAll) CheckProfitLossCloseAll();
       
    MaintainOppositePending();
@@ -783,6 +836,8 @@ void OnTick()
    HandleMarketOpenClose();
    if(IsFlatNow()) ResetSequenceStateIfFlat("OnTick: flat");
    UpdateAbcdSignalIfNeeded();
+   
+   ZZH2L_ManageLotAddTrailingStop();
    
    if(InpAutoStart && IsFlatNow() && !gStarted)
       StartSequence();
