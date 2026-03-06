@@ -816,8 +816,18 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
                double price = HistoryDealGetDouble(ticket, DEAL_PRICE);
                ulong posTicket = HistoryDealGetInteger(ticket, DEAL_POSITION_ID);
                
-               if(type == DEAL_TYPE_BUY) gLastTriggered = ZZ_BUY;
-               else if(type == DEAL_TYPE_SELL) gLastTriggered = ZZ_SELL;
+               if(type == DEAL_TYPE_BUY)
+                 {
+                  gLastTriggered = ZZ_BUY;
+                  gUpperPrice = price; // Anchor the new grid bound based on execution
+                  gLowerPrice = price - (InpStepPoints * _Point);
+                 }
+               else if(type == DEAL_TYPE_SELL)
+                 {
+                  gLastTriggered = ZZ_SELL;
+                  gLowerPrice = price; // Anchor the new grid bound based on execution
+                  gUpperPrice = price + (InpStepPoints * _Point);
+                 }
                
                gCycles++;
                ApplySLTPForOpenedPosition(gLastTriggered, price, posTicket);
