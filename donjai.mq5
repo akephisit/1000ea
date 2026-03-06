@@ -531,9 +531,21 @@ double DesiredOppositePendingPrice(ENUM_ZZ_SIDE lastSide)
       
    symInfo.RefreshRates();
    if(lastSide == ZZ_BUY)
-      return symInfo.Bid() - (InpStepPoints * _Point);
+     {
+      double calculatedPrice = symInfo.Bid() - (InpStepPoints * _Point);
+      // We are holding BUY, pending is SELL STOP.
+      // If price goes UP (profit), calculatedPrice goes UP.
+      // We want the pending order to trail UP. It can NEVER go DOWN (creeping toward a loss).
+      return MathMax(gLowerPrice, calculatedPrice);
+     }
    else
-      return symInfo.Ask() + (InpStepPoints * _Point);
+     {
+      double calculatedPrice = symInfo.Ask() + (InpStepPoints * _Point);
+      // We are holding SELL, pending is BUY STOP.
+      // If price goes DOWN (profit), calculatedPrice goes DOWN.
+      // We want the pending order to trail DOWN. It can NEVER go UP (creeping toward a loss).
+      return MathMin(gUpperPrice, calculatedPrice); 
+     }
   }
 
 void PlaceOppositeStop(ENUM_ZZ_SIDE lastSide, double lots)
@@ -552,7 +564,13 @@ void PlaceOppositeStop(ENUM_ZZ_SIDE lastSide, double lots)
       double desiredPrice = DesiredOppositePendingPrice(lastSide);
       if(MathAbs(existingPrice - desiredPrice) / _Point > PendingRepriceThresholdPts())
         {
-         trade.OrderModify(existingTicket, desiredPrice, 0, 0, ORDER_TIME_GTC, 0);
+         if(trade.OrderModify(existingTicket, desiredPrice, 0, 0, ORDER_TIME_GTC, 0))
+           {
+            // Ratchet the bounds to the new desired price so it doesn't snap back
+            if(lastSide == ZZ_BUY) gLowerPrice = desiredPrice;
+            else gUpperPrice = desiredPrice;
+            SaveState();
+           }
         }
       return;
      }
@@ -565,7 +583,12 @@ void PlaceOppositeStop(ENUM_ZZ_SIDE lastSide, double lots)
      {
       double price = DesiredOppositePendingPrice(lastSide);
       if(symInfo.Bid() > price)
-         trade.SellStop(lots, price, _Symbol, 0, 0, ORDER_TIME_GTC, 0, "Opposite Sell Stop");
+        {
+         if(trade.SellStop(lots, price, _Symbol, 0, 0, ORDER_TIME_GTC, 0, "Opposite Sell Stop"))
+           {
+            if(InpFollowPriceForPending) { gLowerPrice = price; SaveState(); }
+           }
+        }
       else
          trade.Sell(lots, _Symbol, symInfo.Bid(), 0, 0, "Fast Trigger Sell"); // Safety if dropped fast
      }
@@ -573,7 +596,12 @@ void PlaceOppositeStop(ENUM_ZZ_SIDE lastSide, double lots)
      {
       double price = DesiredOppositePendingPrice(lastSide);
       if(symInfo.Ask() < price)
-         trade.BuyStop(lots, price, _Symbol, 0, 0, ORDER_TIME_GTC, 0, "Opposite Buy Stop");
+        {
+         if(trade.BuyStop(lots, price, _Symbol, 0, 0, ORDER_TIME_GTC, 0, "Opposite Buy Stop"))
+           {
+            if(InpFollowPriceForPending) { gUpperPrice = price; SaveState(); }
+           }
+        }
       else
          trade.Buy(lots, _Symbol, symInfo.Ask(), 0, 0, "Fast Trigger Buy"); // Safety if spiked fast
      }
