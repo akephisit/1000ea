@@ -43,7 +43,7 @@ enum ENUM_ABCD_SIGNAL
 //--- Inputs
 input string               InpGroup1                  = "--- Core Settings ---";
 input bool                 InpAutoStart               = true;
-input double               InpStartLot                = 0.01; // Safe start for 100$
+input double               InpStartLot                = 0.01; // Back to 0.01 to prevent margin out
 input ENUM_ABCD_START_MODE InpABCDStartMode           = USE_ABCD_ELSE_BUY;
 input int                  InpStepPoints              = 300;  // 30 Pips gap
 input int                  InpTimerSeconds            = 1;
@@ -52,17 +52,17 @@ input ulong                InpMagic                   = 20260210;
 input string               InpGroup2                  = "--- Lot Progression ---";
 input ENUM_LOT_MODE        InpLotMode                 = LOT_MUL;
 input double               InpLotAdd                  = 0.01;
-input double               InpLotMultiplier           = 2.0;  // 0.01 -> 0.02 -> 0.04 -> 0.08
+input double               InpLotMultiplier           = 1.5;  // Softer martingale (0.01 -> 0.02(rounded) -> 0.03 -> 0.05 -> 0.08)
 input double               InpFirstOppLot             = 0.0;  // 0 = Auto
-input int                  InpMaxCycles               = 5;    // Max 5 cycles for $100
-input double               InpMaxLotLimit             = 0.16; // Stop progression before blowing
+input int                  InpMaxCycles               = 6;    // Max 6 cycles
+input double               InpMaxLotLimit             = 0.50; // Max out before blowing margin
 input bool                 InpPauseOnMaxLot           = true;
 
 input string               InpGroup3                  = "--- Risk & Money Management ---";
 input bool                 InpCloseAllOnProfit        = true; // Turn ON for auto-profit
-input double               InpProfitTargetMoney       = 3.0;  // 3$ target per cycle (~3%)
+input double               InpProfitTargetMoney       = 50.0; // Target 50 cents (~$0.50) per cycle due to smaller lot
 input bool                 InpCloseAllOnLoss          = true; // Turn ON to protect capital
-input double               InpLossLimitMoney          = 50.0; // Protect 50$ max DD (will be checked as -50.0)
+input double               InpLossLimitMoney          = 2000.0; // Protect 2000 cents max DD (~$20) (checked as -2000.0)
 input int                  InpSL_Points               = 0;
 input int                  InpTP_Points               = 0;
 
