@@ -136,7 +136,7 @@ double NormalizeLot(double lots)
 double GetPipsMultiplier()
   {
    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-   if(digits == 5 || digits == 3) return 10.0 * GetPipsMultiplier();
+   if(digits == 5 || digits == 3) return 10.0 * _Point;
    else return _Point;
   }
 
@@ -317,6 +317,10 @@ void CloseAllManagedPositions()
 void ResetSequenceStateIfFlat(string reason)
   {
    if(!IsFlatNow()) return;
+   
+   // Avoid redundant resets which can cause stack overflows or log spam
+   if(!gStarted && gCycles == 0 && gLastTriggered == ZZ_NONE) return;
+   
    CancelAllManagedPendings();
    gStarted = false;
    gCycles = 0;
@@ -664,7 +668,7 @@ void MaintainOppositePending()
   {
    if(IsFlatNow()) 
      {
-      if(gStarted) ResetSequenceStateIfFlat("Flat detected in Maintain");
+      // Rely on the main event loops (OnTick, OnTimer) to handle reset
       return;
      }
    if(IsSidewayNow())
@@ -809,8 +813,14 @@ int OnInit()
    
    if(InpUseTerminalGlobalVar) LoadState();
      
-   if(IsFlatNow()) ResetSequenceStateIfFlat("OnInit: flat");
-   else RebuildFromExisting();
+   if(IsFlatNow()) 
+     {
+      ResetSequenceStateIfFlat("OnInit: flat");
+     }
+   else 
+     {
+      RebuildFromExisting();
+     }
      
    EventSetTimer(InpTimerSeconds);
    
@@ -830,9 +840,13 @@ void OnDeinit(const int reason)
 void OnTimer()
   {
    HandleMarketOpenClose();
-   if(IsFlatNow()) ResetSequenceStateIfFlat("OnTimer: flat");
-   UpdateAbcdSignalIfNeeded();
    
+   if(IsFlatNow() && gStarted) 
+     {
+      ResetSequenceStateIfFlat("OnTimer: flat detected (clearing)");
+     }
+     
+   UpdateAbcdSignalIfNeeded();
    ZZH2L_ManageLotAddTrailingStop();
    
    if(gPendingCloseAll) CheckProfitLossCloseAll();
@@ -845,9 +859,13 @@ void OnTick()
    if(!symInfo.RefreshRates()) return;
    
    HandleMarketOpenClose();
-   if(IsFlatNow()) ResetSequenceStateIfFlat("OnTick: flat");
-   UpdateAbcdSignalIfNeeded();
    
+   if(IsFlatNow() && gStarted) 
+     {
+      ResetSequenceStateIfFlat("OnTick: flat detected (clearing)");
+     }
+     
+   UpdateAbcdSignalIfNeeded();
    ZZH2L_ManageLotAddTrailingStop();
    
    if(InpAutoStart && IsFlatNow() && !gStarted)
@@ -855,14 +873,17 @@ void OnTick()
       
    if(gPendingCloseAll) return;
    
-   if(InpMaxCycles > 0 && gCycles >= InpMaxCycles)
+   if(InpMaxCycles > 0 && gCycles >= InpMaxCycles && !IsFlatNow())
      {
       CancelAllManagedPendings();
       CheckProfitLossCloseAll();
      }
      
-   CheckProfitLossCloseAll();
-   MaintainOppositePending();
+   if(!IsFlatNow()) 
+     {
+      CheckProfitLossCloseAll();
+      MaintainOppositePending();
+     }
   }
 
 void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest &request, const MqlTradeResult &result)
