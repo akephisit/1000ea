@@ -62,7 +62,7 @@ input string               InpGroup3                  = "--- Risk & Money Manage
 input bool                 InpCloseAllOnProfit        = true; // Turn ON for auto-profit
 input double               InpProfitTargetMoney       = 3.0;  // 3$ target per cycle (~3%)
 input bool                 InpCloseAllOnLoss          = true; // Turn ON to protect capital
-input double               InpLossLimitMoney          = -50.0;// Protect 50% max DD
+input double               InpLossLimitMoney          = 50.0; // Protect 50$ max DD (will be checked as -50.0)
 input int                  InpSL_Points               = 0;
 input int                  InpTP_Points               = 0;
 
@@ -375,6 +375,7 @@ void RebuildFromExisting()
          gLastTriggered = side;
          gNextLot = GetNextLot(vol);
          gStarted = true;
+         gCycles = count;
          SaveState();
          MaintainOppositePending();
         }
@@ -570,6 +571,8 @@ void PlaceOppositeStop(ENUM_ZZ_SIDE lastSide, double lots)
    if(IsSidewayNow()) return; // ZZH2L_MaintainSidewayCounterOrders handles sideway instead
    if(gPausedByMaxLot) return;
    
+   if(CountPositionsByMagic() != gCycles) return; // Prevent async race condition (e.g. pending triggered but OnTradeTrans not yet updated)
+   
    lots = NormalizeLot(lots);
    long wantType = (lastSide == ZZ_BUY) ? ORDER_TYPE_SELL_STOP : ORDER_TYPE_BUY_STOP;
    
@@ -606,7 +609,15 @@ void PlaceOppositeStop(ENUM_ZZ_SIDE lastSide, double lots)
            }
         }
       else
-         trade.Sell(lots, _Symbol, symInfo.Bid(), 0, 0, "Fast Trigger Sell"); // Safety if dropped fast
+        {
+         static datetime waitSell = 0;
+         if(waitSell == 0) waitSell = TimeCurrent();
+         else if(TimeCurrent() - waitSell >= 3) // Wait 3s to ensure it's not just a delayed MT5 sync
+           {
+            trade.Sell(lots, _Symbol, symInfo.Bid(), 0, 0, "Fast Trigger Sell"); // Safety if dropped fast
+            waitSell = 0;
+           }
+        }
      }
    else if(lastSide == ZZ_SELL)
      {
@@ -619,7 +630,15 @@ void PlaceOppositeStop(ENUM_ZZ_SIDE lastSide, double lots)
            }
         }
       else
-         trade.Buy(lots, _Symbol, symInfo.Ask(), 0, 0, "Fast Trigger Buy"); // Safety if spiked fast
+        {
+         static datetime waitBuy = 0;
+         if(waitBuy == 0) waitBuy = TimeCurrent();
+         else if(TimeCurrent() - waitBuy >= 3) // Wait 3s to ensure it's not just a delayed MT5 sync
+           {
+            trade.Buy(lots, _Symbol, symInfo.Ask(), 0, 0, "Fast Trigger Buy"); // Safety if spiked fast
+            waitBuy = 0;
+           }
+        }
      }
   }
 
@@ -643,8 +662,9 @@ void StartSequence()
         {
          gLastTriggered = ZZ_BUY;
          gNextLot = GetFirstOppLot();
-         gCycles = 1;
-         PlaceOppositeStop(ZZ_BUY, gNextLot);
+         gCycles = 1; // Wait for transaction to increment, but assume 1 initially to prevent race
+         SaveState();
+         // Initial stop placement handled by OnTradeTransaction after position confirmation
         }
      }
    else if(gAbcdSignal == ABCD_SELL)
@@ -656,7 +676,7 @@ void StartSequence()
          gLastTriggered = ZZ_SELL;
          gNextLot = GetFirstOppLot();
          gCycles = 1;
-         PlaceOppositeStop(ZZ_SELL, gNextLot);
+         SaveState();
         }
      }
      
@@ -708,6 +728,8 @@ void MaintainOppositePending()
 
 void ZZH2L_MaintainSidewayCounterOrders()
   {
+   if(CountPositionsByMagicValue(LotAddShadowMagic()) > 0) return; // Allow only one active shadow position at a time
+   
    // In sideway, place limits instead using ShadowMagic
    ulong tic; double prc;
    CTrade shadowTrade;
@@ -787,7 +809,11 @@ void CheckProfitLossCloseAll()
    
    bool closeCondition = false;
    if(InpCloseAllOnProfit && totalFloat >= InpProfitTargetMoney) closeCondition = true;
-   if(InpCloseAllOnLoss && totalFloat <= InpLossLimitMoney) closeCondition = true;
+   
+   double safeLossLimit = InpLossLimitMoney;
+   if(safeLossLimit > 0) safeLossLimit = -safeLossLimit; // Ensure it is treated as a negative boundary
+   
+   if(InpCloseAllOnLoss && totalFloat <= safeLossLimit) closeCondition = true;
    
    if(closeCondition)
      {
@@ -916,7 +942,12 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
                   gUpperPrice = price + (InpStepPoints * GetPipsMultiplier());
                  }
                
-               gCycles++;
+               // Count logical cycles. It starts at cycle 1 for the first trigger.
+               int actualCount = CountPositionsByMagic();
+               // Update cycle count smoothly preventing double counts if transactions hit late
+               if (actualCount > gCycles) gCycles = actualCount; 
+               else if (gCycles == 0 && actualCount == 1) gCycles = 1; 
+
                ApplySLTPForOpenedPosition(gLastTriggered, price, posTicket);
                
                gNextLot = GetNextLot(vol);
