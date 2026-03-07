@@ -698,19 +698,22 @@ void ZZH2L_MaintainSidewayCounterOrders()
   {
    // In sideway, place limits instead using ShadowMagic
    ulong tic; double prc;
+   CTrade shadowTrade;
+   shadowTrade.SetExpertMagicNumber(LotAddShadowMagic());
+   
    if(gLastTriggered == ZZ_BUY && !PendingExistsByMagic(ORDER_TYPE_BUY_LIMIT, LotAddShadowMagic(), tic, prc))
      {
       symInfo.RefreshRates();
       double price = gLowerPrice;
-      if(symInfo.Ask() > price) trade.BuyLimit(gNextLot, price, _Symbol, 0, 0, ORDER_TIME_GTC, 0, "Shadow Buy Limit (Sideway)");
-      else trade.Buy(gNextLot, _Symbol, symInfo.Ask(), 0, 0, "Shadow Buy Triggered");
+      if(symInfo.Ask() > price) shadowTrade.BuyLimit(gNextLot, price, _Symbol, 0, 0, ORDER_TIME_GTC, 0, "Shadow Buy Limit (Sideway)");
+      else shadowTrade.Buy(gNextLot, _Symbol, symInfo.Ask(), 0, 0, "Shadow Buy Triggered");
      }
    else if(gLastTriggered == ZZ_SELL && !PendingExistsByMagic(ORDER_TYPE_SELL_LIMIT, LotAddShadowMagic(), tic, prc))
      {
       symInfo.RefreshRates();
       double price = gUpperPrice;
-      if(symInfo.Bid() < price) trade.SellLimit(gNextLot, price, _Symbol, 0, 0, ORDER_TIME_GTC, 0, "Shadow Sell Limit (Sideway)");
-      else trade.Sell(gNextLot, _Symbol, symInfo.Bid(), 0, 0, "Shadow Sell Triggered");
+      if(symInfo.Bid() < price) shadowTrade.SellLimit(gNextLot, price, _Symbol, 0, 0, ORDER_TIME_GTC, 0, "Shadow Sell Limit (Sideway)");
+      else shadowTrade.Sell(gNextLot, _Symbol, symInfo.Bid(), 0, 0, "Shadow Sell Triggered");
      }
   }
 
