@@ -43,40 +43,40 @@ enum ENUM_ABCD_SIGNAL
 //--- Inputs
 input string               InpGroup1                  = "--- Core Settings ---";
 input bool                 InpAutoStart               = true;
-input double               InpStartLot                = 0.10;
+input double               InpStartLot                = 0.01; // Safe start for 100$
 input ENUM_ABCD_START_MODE InpABCDStartMode           = USE_ABCD_ELSE_BUY;
-input int                  InpStepPoints              = 300;
+input int                  InpStepPoints              = 300;  // 30 Pips gap
 input int                  InpTimerSeconds            = 1;
 input ulong                InpMagic                   = 20260210;
 
 input string               InpGroup2                  = "--- Lot Progression ---";
-input ENUM_LOT_MODE        InpLotMode                 = LOT_ADD;
-input double               InpLotAdd                  = 0.10;
-input double               InpLotMultiplier           = 2.0;
+input ENUM_LOT_MODE        InpLotMode                 = LOT_MUL;
+input double               InpLotAdd                  = 0.01;
+input double               InpLotMultiplier           = 2.0;  // 0.01 -> 0.02 -> 0.04 -> 0.08
 input double               InpFirstOppLot             = 0.0;  // 0 = Auto
-input int                  InpMaxCycles               = 0;    // 0 = No limit
-input double               InpMaxLotLimit             = 0.0;  // 0 = No cap
+input int                  InpMaxCycles               = 5;    // Max 5 cycles for $100
+input double               InpMaxLotLimit             = 0.16; // Stop progression before blowing
 input bool                 InpPauseOnMaxLot           = true;
 
 input string               InpGroup3                  = "--- Risk & Money Management ---";
-input bool                 InpCloseAllOnProfit        = false;
-input double               InpProfitTargetMoney       = 50.0;
-input bool                 InpCloseAllOnLoss          = false;
-input double               InpLossLimitMoney          = -200.0;
+input bool                 InpCloseAllOnProfit        = true; // Turn ON for auto-profit
+input double               InpProfitTargetMoney       = 3.0;  // 3$ target per cycle (~3%)
+input bool                 InpCloseAllOnLoss          = true; // Turn ON to protect capital
+input double               InpLossLimitMoney          = -50.0;// Protect 50% max DD
 input int                  InpSL_Points               = 0;
 input int                  InpTP_Points               = 0;
 
 input string               InpGroup4                  = "--- Anti-Sideway & Follow Price ---";
-input int                  InpSidewayMinATRPoints     = 0;
+input int                  InpSidewayMinATRPoints     = 100;  // Activate sideway if < 100 points
 input int                  InpATRPeriod               = 14;
-input bool                 InpFollowPriceForPending   = false;
-input int                  InpPendingRepriceThresholdPoints = 10;
+input bool                 InpFollowPriceForPending   = true; // ON to drag order
+input int                  InpPendingRepriceThresholdPoints = 15;
 
 input string               InpGroup5                  = "--- ZigZag ABCD Signal ---";
-input ENUM_TIMEFRAMES      InpABCDTimeframe           = PERIOD_CURRENT;
-input int                  InpABCDLookbackBars        = 100;
-input int                  InpABCDConfirmBars         = 2;
-input int                  InpABCDMinLegPoints        = 50;
+input ENUM_TIMEFRAMES      InpABCDTimeframe           = PERIOD_H1; // H1 gives steadier trend
+input int                  InpABCDLookbackBars        = 200;
+input int                  InpABCDConfirmBars         = 1;
+input int                  InpABCDMinLegPoints        = 100; // Filter small noises
 input int                  InpZigZagDepth             = 12;
 input int                  InpZigZagDeviation         = 5;
 input int                  InpZigZagBackstep          = 3;
@@ -85,7 +85,7 @@ input string               InpZigZagPath              = "Examples\\ZigZag";
 input string               InpGroup6                  = "--- System ---";
 input bool                 InpUseTerminalGlobalVar    = true;
 input bool                 InpDebugPrint              = true;
-input bool                 InpLotAddShadowEnabled     = false;
+input bool                 InpLotAddShadowEnabled     = true; // USE shadow in Sideway
 
 input string               InpGroup7                  = "--- Shadow & Trailing Module ---";
 input int                  InpShadowTrailingStopPoints= 50;
@@ -133,10 +133,18 @@ double NormalizeLot(double lots)
    return l;
   }
 
+double GetPipsMultiplier()
+  {
+   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   if(digits == 5 || digits == 3) return 10.0 * GetPipsMultiplier();
+   else return _Point;
+  }
+
 double PriceByPoints(double price, int points, bool up)
   {
-   if(up) return price + (points * _Point);
-   return price - (points * _Point);
+   double pipsMult = GetPipsMultiplier();
+   if(up) return price + (points * pipsMult);
+   return price - (points * pipsMult);
   }
 
 bool IsTradeAllowedNow()
@@ -353,12 +361,12 @@ void RebuildFromExisting()
          if(side == ZZ_BUY)
            {
             gUpperPrice = openPrice;
-            gLowerPrice = gUpperPrice - (InpStepPoints * _Point);
+            gLowerPrice = gUpperPrice - (InpStepPoints * GetPipsMultiplier());
            }
          else
            {
             gLowerPrice = openPrice;
-            gUpperPrice = gLowerPrice + (InpStepPoints * _Point);
+            gUpperPrice = gLowerPrice + (InpStepPoints * GetPipsMultiplier());
            }
          gLastTriggered = side;
          gNextLot = GetNextLot(vol);
@@ -384,7 +392,7 @@ double CurrentATRPoints()
    if(atrHandle == INVALID_HANDLE) return 0;
    double atr[];
    if(CopyBuffer(atrHandle, 0, 1, 1, atr) > 0)
-      return atr[0] / _Point;
+      return atr[0] / GetPipsMultiplier();
    return 0;
   }
 
@@ -452,7 +460,7 @@ void UpdateAbcdSignalIfNeeded()
    double B = pivots[2];
    double A = pivots[3]; // Oldest
 
-   double minLeg = InpABCDMinLegPoints * _Point;
+   double minLeg = InpABCDMinLegPoints * GetPipsMultiplier();
    
    // Bullish: A(high) -> B(low) -> C(lower high) -> D(lower low) -> wait, Bullish break means price goes UP after D
    // Actually, standard ABCD Bullish: down -> up -> down -> breaking up?
@@ -513,13 +521,13 @@ void ApplySLTPForOpenedPosition(ENUM_ZZ_SIDE side, double openPrice, ulong ticke
    double sl = 0, tp = 0;
    if(side == ZZ_BUY)
      {
-      if(InpSL_Points > 0) sl = openPrice - (InpSL_Points * _Point);
-      if(InpTP_Points > 0) tp = openPrice + (InpTP_Points * _Point);
+      if(InpSL_Points > 0) sl = openPrice - (InpSL_Points * GetPipsMultiplier());
+      if(InpTP_Points > 0) tp = openPrice + (InpTP_Points * GetPipsMultiplier());
      }
    else if(side == ZZ_SELL)
      {
-      if(InpSL_Points > 0) sl = openPrice + (InpSL_Points * _Point);
-      if(InpTP_Points > 0) tp = openPrice - (InpTP_Points * _Point);
+      if(InpSL_Points > 0) sl = openPrice + (InpSL_Points * GetPipsMultiplier());
+      if(InpTP_Points > 0) tp = openPrice - (InpTP_Points * GetPipsMultiplier());
      }
      
    trade.PositionModify(ticket, sl, tp);
@@ -536,7 +544,7 @@ double DesiredOppositePendingPrice(ENUM_ZZ_SIDE lastSide)
    symInfo.RefreshRates();
    if(lastSide == ZZ_BUY)
      {
-      double calculatedPrice = symInfo.Bid() - (InpStepPoints * _Point);
+      double calculatedPrice = symInfo.Bid() - (InpStepPoints * GetPipsMultiplier());
       // We are holding BUY, pending is SELL STOP.
       // If price goes UP (profit), calculatedPrice goes UP.
       // We want the pending order to trail UP. It can NEVER go DOWN (creeping toward a loss).
@@ -544,7 +552,7 @@ double DesiredOppositePendingPrice(ENUM_ZZ_SIDE lastSide)
      }
    else
      {
-      double calculatedPrice = symInfo.Ask() + (InpStepPoints * _Point);
+      double calculatedPrice = symInfo.Ask() + (InpStepPoints * GetPipsMultiplier());
       // We are holding SELL, pending is BUY STOP.
       // If price goes DOWN (profit), calculatedPrice goes DOWN.
       // We want the pending order to trail DOWN. It can NEVER go UP (creeping toward a loss).
@@ -566,7 +574,7 @@ void PlaceOppositeStop(ENUM_ZZ_SIDE lastSide, double lots)
    if(PendingExists(wantType, existingTicket, existingPrice))
      {
       double desiredPrice = DesiredOppositePendingPrice(lastSide);
-      if(MathAbs(existingPrice - desiredPrice) / _Point > PendingRepriceThresholdPts())
+      if(MathAbs(existingPrice - desiredPrice) / GetPipsMultiplier() > PendingRepriceThresholdPts())
         {
          if(trade.OrderModify(existingTicket, desiredPrice, 0, 0, ORDER_TIME_GTC, 0))
            {
@@ -626,7 +634,7 @@ void StartSequence()
    if(gAbcdSignal == ABCD_BUY)
      {
       gUpperPrice = ask;
-      gLowerPrice = ask - (InpStepPoints * _Point);
+      gLowerPrice = ask - (InpStepPoints * GetPipsMultiplier());
       if(trade.Buy(InpStartLot, _Symbol, ask, 0, 0, "Sequence Start Buy"))
         {
          gLastTriggered = ZZ_BUY;
@@ -638,7 +646,7 @@ void StartSequence()
    else if(gAbcdSignal == ABCD_SELL)
      {
       gLowerPrice = bid;
-      gUpperPrice = bid + (InpStepPoints * _Point);
+      gUpperPrice = bid + (InpStepPoints * GetPipsMultiplier());
       if(trade.Sell(InpStartLot, _Symbol, bid, 0, 0, "Sequence Start Sell"))
         {
          gLastTriggered = ZZ_SELL;
@@ -739,10 +747,10 @@ void ZZH2L_ManageLotAddTrailingStop()
             
             if(posInfo.PositionType() == POSITION_TYPE_BUY)
               {
-               if(bid - openPrice > InpShadowTrailingStopPoints * _Point)
+               if(bid - openPrice > InpShadowTrailingStopPoints * GetPipsMultiplier())
                  {
-                  double newsl = bid - (InpShadowTrailingStopPoints * _Point);
-                  if(sl == 0.0 || newsl > sl + (InpShadowTrailingStepPoints * _Point))
+                  double newsl = bid - (InpShadowTrailingStopPoints * GetPipsMultiplier());
+                  if(sl == 0.0 || newsl > sl + (InpShadowTrailingStepPoints * GetPipsMultiplier()))
                     {
                      trade.PositionModify(t, newsl, tp);
                     }
@@ -750,10 +758,10 @@ void ZZH2L_ManageLotAddTrailingStop()
               }
             else if(posInfo.PositionType() == POSITION_TYPE_SELL)
               {
-               if(openPrice - ask > InpShadowTrailingStopPoints * _Point)
+               if(openPrice - ask > InpShadowTrailingStopPoints * GetPipsMultiplier())
                  {
-                  double newsl = ask + (InpShadowTrailingStopPoints * _Point);
-                  if(sl == 0.0 || newsl < sl - (InpShadowTrailingStepPoints * _Point))
+                  double newsl = ask + (InpShadowTrailingStopPoints * GetPipsMultiplier());
+                  if(sl == 0.0 || newsl < sl - (InpShadowTrailingStepPoints * GetPipsMultiplier()))
                     {
                      trade.PositionModify(t, newsl, tp);
                     }
@@ -878,13 +886,13 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
                  {
                   gLastTriggered = ZZ_BUY;
                   gUpperPrice = price; // Anchor the new grid bound based on execution
-                  gLowerPrice = price - (InpStepPoints * _Point);
+                  gLowerPrice = price - (InpStepPoints * GetPipsMultiplier());
                  }
                else if(type == DEAL_TYPE_SELL)
                  {
                   gLastTriggered = ZZ_SELL;
                   gLowerPrice = price; // Anchor the new grid bound based on execution
-                  gUpperPrice = price + (InpStepPoints * _Point);
+                  gUpperPrice = price + (InpStepPoints * GetPipsMultiplier());
                  }
                
                gCycles++;
