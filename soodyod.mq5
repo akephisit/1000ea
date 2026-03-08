@@ -903,7 +903,12 @@ bool PlaceOppositeStop(ZZ_SIDE lastSide, double lots)
       }
 
       if((bid - price) < minDist)
-         price = bid - (minDist + 2*_Point);
+      {
+         if(InpDebugPrint) Print("Price is too close/passed Lower level (", DoubleToString(price, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)), "), executing Market SELL instead of SellStop");
+         bool okSell = trade.Sell(lots, _Symbol, 0.0, 0.0, 0.0, InpComment);
+         if(okSell) gLastDealMs = (ulong)GetTickCount();
+         return okSell;
+      }
 
       price = NormalizeDouble(price, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
       bool ok = trade.SellStop(lots, price, _Symbol, 0.0, 0.0, ORDER_TIME_GTC, 0, InpComment);
@@ -927,7 +932,12 @@ bool PlaceOppositeStop(ZZ_SIDE lastSide, double lots)
       }
 
       if((price - ask) < minDist)
-         price = ask + (minDist + 2*_Point);
+      {
+         if(InpDebugPrint) Print("Price is too close/passed Upper level (", DoubleToString(price, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)), "), executing Market BUY instead of BuyStop");
+         bool okBuy = trade.Buy(lots, _Symbol, 0.0, 0.0, 0.0, InpComment);
+         if(okBuy) gLastDealMs = (ulong)GetTickCount();
+         return okBuy;
+      }
 
       price = NormalizeDouble(price, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
       bool ok = trade.BuyStop(lots, price, _Symbol, 0.0, 0.0, ORDER_TIME_GTC, 0, InpComment);
