@@ -38,8 +38,20 @@ input double   InpLotAdd               = 0.10;       // ADD: +each leg (0.1->0.2
 input double   InpLotMultiplier        = 2.0;        // MUL: *each leg (0.1->0.2->0.4...)
 
 input double   InpFirstOppLot          = 0.00;       // First opposite lot override (0 = auto by mode)
-input int      InpStepPoints           = 300;        // Distance between Upper/Lower in points
+input int      InpStepPoints           = 300;        // Base distance between Upper/Lower (Points)
 input int      InpMaxCycles            = 0;          // Max triggered legs (0=unlimited)
+
+// Auto ATR Distance (Dynamic Step)
+input bool     InpAutoATRStep          = true;       // Enable Auto ATR Step Distance
+input int      InpATRStepPeriod        = 14;         // ATR Period for Step
+input double   InpATRStepMultiplier    = 1.0;        // ATR Multiplier for Step
+input int      InpMinStepPoints        = 100;        // Minimum Step Points
+input int      InpMaxStepPoints        = 5000;       // Maximum Step Points (0 = disable limit)
+
+// Trailing Stop (When One-Sided)
+input bool     InpUseTrailing          = true;       // Enable Trailing Stop
+input int      InpTrailingStartPoints  = 200;        // Trailing Start (Points profit)
+input int      InpTrailingDistancePoints = 100;      // Trailing Distance (Points)
 
 // Safety / Exit
 input bool     InpCloseAllOnProfit     = false;      // Close all when profit target hit
@@ -102,12 +114,38 @@ datetime    gLastTfBarTime = 0;   // reduce repeated scanning
 
 //------------------------- Anti-sideway / max lot state ------------
 int      gAtrHandle        = INVALID_HANDLE;
+int      gAtrStepHandle    = INVALID_HANDLE;
 datetime gLastAtrBarTime   = 0;
 bool     gPausedBySideway  = false;
 bool     gPausedByMaxLot   = false;
 
 // Pending reprice throttle
 datetime gLastPendingRepriceBarTime = 0;
+
+//------------------------- DYNAMIC STEP ----------------------------
+int GetCurrentStepPoints()
+{
+   if(!InpAutoATRStep) return InpStepPoints;
+   
+   if(gAtrStepHandle == INVALID_HANDLE)
+   {
+      gAtrStepHandle = iATR(_Symbol, PERIOD_CURRENT, InpATRStepPeriod);
+      if(gAtrStepHandle == INVALID_HANDLE) return InpStepPoints;
+   }
+   
+   double atr[];
+   ArraySetAsSeries(atr, true);
+   // shift=1 to use last completed bar to avoid tick noise jitter
+   if(CopyBuffer(gAtrStepHandle, 0, 1, 1, atr) <= 0) return InpStepPoints;
+   
+   double atrPts = atr[0] / _Point;
+   int step = (int)MathRound(atrPts * InpATRStepMultiplier);
+   
+   if(step < InpMinStepPoints) step = InpMinStepPoints;
+   if(InpMaxStepPoints > 0 && step > InpMaxStepPoints) step = InpMaxStepPoints;
+   
+   return step;
+}
 
 //------------------------- UTIL ------------------------------------
 void DPrint(const string msg){ if(InpDebugPrint) Print(msg); }
@@ -227,7 +265,7 @@ int PendingRepriceThresholdPts()
 {
    if(InpPendingRepriceThresholdPoints > 0)
       return InpPendingRepriceThresholdPoints;
-   int thr = InpStepPoints / 5;
+   int thr = GetCurrentStepPoints() / 5;
    if(thr < 10) thr = 10;
    return thr;
 }
@@ -252,11 +290,12 @@ double DesiredOppositePendingPrice(const ZZ_SIDE lastSide)
 
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   int stepPts = GetCurrentStepPoints();
 
    if(lastSide == SIDE_BUY)
    {
       // Keep SELL STOP below current bid by StepPoints
-      double price = PriceByPoints(bid, InpStepPoints, false);
+      double price = PriceByPoints(bid, stepPts, false);
       if((bid - price) < minDist)
          price = bid - (minDist + 2*_Point);
       return NormalizeDouble(price, digits);
@@ -264,7 +303,7 @@ double DesiredOppositePendingPrice(const ZZ_SIDE lastSide)
    else if(lastSide == SIDE_SELL)
    {
       // Keep BUY STOP above current ask by StepPoints
-      double price = PriceByPoints(ask, InpStepPoints, true);
+      double price = PriceByPoints(ask, stepPts, true);
       if((price - ask) < minDist)
          price = ask + (minDist + 2*_Point);
       return NormalizeDouble(price, digits);
@@ -848,6 +887,75 @@ double GetFirstOppLot()
    return lot;
 }
 
+//====================================================================
+// TRAILING STOP (ONE-SIDED)
+//====================================================================
+void CountSides(int &buyCount, int &sellCount)
+{
+   buyCount = 0; sellCount = 0;
+   for(int i=PositionsTotal()-1; i>=0; --i)
+   {
+      ulong t=0;
+      if(!SelectPosByIndexSafe(i, t)) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC) != InpMagic) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+      long type = (long)PositionGetInteger(POSITION_TYPE);
+      if(type == POSITION_TYPE_BUY) buyCount++;
+      else if(type == POSITION_TYPE_SELL) sellCount++;
+   }
+}
+
+void ManageTrailingStop()
+{
+   if(!InpUseTrailing || InpTrailingStartPoints <= 0 || InpTrailingDistancePoints <= 0) return;
+   
+   int buyCount=0, sellCount=0;
+   CountSides(buyCount, sellCount);
+   
+   // Apply trailing only if it is one-sided
+   if((buyCount > 0 && sellCount > 0) || (buyCount == 0 && sellCount == 0)) return;
+   
+   if(!IsTradeAllowedNow()) return;
+   
+   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   double point = _Point;
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   
+   for(int i=PositionsTotal()-1; i>=0; --i)
+   {
+      ulong t=0;
+      if(!SelectPosByIndexSafe(i, t)) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC) != InpMagic) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+      
+      long type = (long)PositionGetInteger(POSITION_TYPE);
+      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl = PositionGetDouble(POSITION_SL);
+      
+      if(type == POSITION_TYPE_BUY)
+      {
+         double profitPts = (bid - openPrice) / point;
+         if(profitPts >= InpTrailingStartPoints)
+         {
+            double newSL = NormalizeDouble(bid - (InpTrailingDistancePoints * point), digits);
+            if(sl == 0.0 || newSL > sl)
+               trade.PositionModify(t, newSL, PositionGetDouble(POSITION_TP));
+         }
+      }
+      else if(type == POSITION_TYPE_SELL)
+      {
+         double profitPts = (openPrice - ask) / point;
+         if(profitPts >= InpTrailingStartPoints)
+         {
+            double newSL = NormalizeDouble(ask + (InpTrailingDistancePoints * point), digits);
+            if(sl == 0.0 || newSL < sl)
+               trade.PositionModify(t, newSL, PositionGetDouble(POSITION_TP));
+         }
+      }
+   }
+}
+
 //------------------------- CORE LOGIC --------------------------------
 bool PlaceOppositeStop(ZZ_SIDE lastSide, double lots)
 {
@@ -898,7 +1006,7 @@ bool PlaceOppositeStop(ZZ_SIDE lastSide, double lots)
          if(price > 0.0)
          {
             gLowerPrice = price;
-            gUpperPrice = NormalizeDouble(PriceByPoints(gLowerPrice, InpStepPoints, true), (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
+            gUpperPrice = NormalizeDouble(PriceByPoints(gLowerPrice, GetCurrentStepPoints(), true), (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
          }
       }
 
@@ -922,7 +1030,7 @@ bool PlaceOppositeStop(ZZ_SIDE lastSide, double lots)
          if(price > 0.0)
          {
             gUpperPrice = price;
-            gLowerPrice = NormalizeDouble(PriceByPoints(gUpperPrice, InpStepPoints, false), (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
+            gLowerPrice = NormalizeDouble(PriceByPoints(gUpperPrice, GetCurrentStepPoints(), false), (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
          }
       }
 
@@ -982,12 +1090,12 @@ bool StartSequence()
    if(startSide == SIDE_BUY)
    {
       gUpperPrice = NormalizeDouble(ask, digits);
-      gLowerPrice = NormalizeDouble(PriceByPoints(gUpperPrice, InpStepPoints, false), digits);
+      gLowerPrice = NormalizeDouble(PriceByPoints(gUpperPrice, GetCurrentStepPoints(), false), digits);
    }
    else
    {
       gLowerPrice = NormalizeDouble(bid, digits);
-      gUpperPrice = NormalizeDouble(PriceByPoints(gLowerPrice, InpStepPoints, true), digits);
+      gUpperPrice = NormalizeDouble(PriceByPoints(gLowerPrice, GetCurrentStepPoints(), true), digits);
    }
 
    bool ok = (startSide==SIDE_BUY)
@@ -1073,7 +1181,7 @@ void MaintainOppositePending()
             {
                if(hasSellStop) trade.OrderDelete(sellT);
                gLowerPrice = want;
-               gUpperPrice = NormalizeDouble(PriceByPoints(gLowerPrice, InpStepPoints, true), (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
+               gUpperPrice = NormalizeDouble(PriceByPoints(gLowerPrice, GetCurrentStepPoints(), true), (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
                PlaceOppositeStop(SIDE_BUY, gNextLot);
                SaveState();
                return;
@@ -1097,7 +1205,7 @@ void MaintainOppositePending()
             {
                if(hasBuyStop) trade.OrderDelete(buyT);
                gUpperPrice = want;
-               gLowerPrice = NormalizeDouble(PriceByPoints(gUpperPrice, InpStepPoints, false), (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
+               gLowerPrice = NormalizeDouble(PriceByPoints(gUpperPrice, GetCurrentStepPoints(), false), (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
                PlaceOppositeStop(SIDE_SELL, gNextLot);
                SaveState();
                return;
@@ -1143,7 +1251,7 @@ bool RebuildFromExisting()
    else
       gUpperPrice = NormalizeDouble(SymbolInfoDouble(_Symbol, SYMBOL_BID), (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
 
-   gLowerPrice = NormalizeDouble(PriceByPoints(gUpperPrice, InpStepPoints, false),
+   gLowerPrice = NormalizeDouble(PriceByPoints(gUpperPrice, GetCurrentStepPoints(), false),
                                  (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
 
    ZZ_SIDE lastS; double lastP,lastV;
@@ -1406,7 +1514,10 @@ void OnTimer()
 
    // ถ้าตลาดเปิดอยู่ ก็รักษา pending ไว้ให้ครบ (บางที OnTick เงียบ)
    if(IsTradeAllowedNow())
+   {
       MaintainOppositePending();
+      ManageTrailingStop();
+   }
 }
 
 void OnTick()
@@ -1443,6 +1554,7 @@ void OnTick()
    if(!gStarted) return;
 
    MaintainOppositePending();
+   ManageTrailingStop();
 }
 
 void OnTradeTransaction(const MqlTradeTransaction& trans,
