@@ -243,7 +243,13 @@ void ResetSequenceStateIfFlat(const string reason)
 
    // If no positions remain, ensure we don't keep stale lot/levels from previous cycle.
    if(IsTradeAllowedNow())
-      CancelAllPendingsByMagic();
+   {
+      if(!CancelAllPendingsByMagic())
+      {
+         if(InpDebugPrint) Print("ResetSequenceStateIfFlat: Failed to cancel all pendings. Waiting for retry.");
+         return; // Abort reset until pendings are clean
+      }
+   }
 
    gStarted = false;
    gCycles = 0;
@@ -573,6 +579,27 @@ int CountPositionsByMagic()
       if((ulong)PositionGetInteger(POSITION_MAGIC) != InpMagic) continue;
       if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
       cnt++;
+   }
+   return cnt;
+}
+
+int CountPendingsByMagic()
+{
+   int cnt = 0;
+   for(int i=OrdersTotal()-1; i>=0; --i)
+   {
+      ulong ticket = (ulong)OrderGetTicket(i);
+      if(ticket == 0) continue;
+      if((ulong)OrderGetInteger(ORDER_MAGIC) != InpMagic) continue;
+      if(OrderGetString(ORDER_SYMBOL) != _Symbol) continue;
+      
+      ENUM_ORDER_TYPE type = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+      if(type==ORDER_TYPE_BUY_STOP || type==ORDER_TYPE_SELL_STOP ||
+         type==ORDER_TYPE_BUY_LIMIT|| type==ORDER_TYPE_SELL_LIMIT ||
+         type==ORDER_TYPE_BUY_STOP_LIMIT || type==ORDER_TYPE_SELL_STOP_LIMIT)
+      {
+         cnt++;
+      }
    }
    return cnt;
 }
@@ -1082,6 +1109,15 @@ bool StartSequence()
    {
       Print("This EA requires Hedging account mode.");
       return false;
+   }
+
+   if(CountPendingsByMagic() > 0)
+   {
+      if(!CancelAllPendingsByMagic())
+      {
+         if(InpDebugPrint) Print("StartSequence blocked: Existing pendings cannot be cleared yet.");
+         return false;
+      }
    }
 
    if(!IsTradeAllowedNow())
