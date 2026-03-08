@@ -922,6 +922,15 @@ void ManageTrailingStop()
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    
+   // Safety check against tight stops level
+   long stopsLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   long spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+   double minDist = (stopsLevel > spread ? stopsLevel : spread) * point;
+   
+   double trailDist = InpTrailingDistancePoints * point;
+   if(trailDist < minDist + (2 * point))
+      trailDist = minDist + (5 * point); // Force distance to be safe from Invalid Parameters
+   
    for(int i=PositionsTotal()-1; i>=0; --i)
    {
       ulong t=0;
@@ -938,9 +947,13 @@ void ManageTrailingStop()
          double profitPts = (bid - openPrice) / point;
          if(profitPts >= InpTrailingStartPoints)
          {
-            double newSL = NormalizeDouble(bid - (InpTrailingDistancePoints * point), digits);
-            if(sl == 0.0 || newSL > sl)
-               trade.PositionModify(t, newSL, PositionGetDouble(POSITION_TP));
+            double newSL = NormalizeDouble(bid - trailDist, digits);
+            // Modify only if SL needs to jump up by at least 15 points (anti-spam)
+            if(sl == 0.0 || newSL > sl + (15 * point))
+            {
+               bool ok = trade.PositionModify(t, newSL, PositionGetDouble(POSITION_TP));
+               if(!ok && InpDebugPrint) Print("Trailing BUY #", t, " failed: ", trade.ResultRetcodeDescription());
+            }
          }
       }
       else if(type == POSITION_TYPE_SELL)
@@ -948,9 +961,13 @@ void ManageTrailingStop()
          double profitPts = (openPrice - ask) / point;
          if(profitPts >= InpTrailingStartPoints)
          {
-            double newSL = NormalizeDouble(ask + (InpTrailingDistancePoints * point), digits);
-            if(sl == 0.0 || newSL < sl)
-               trade.PositionModify(t, newSL, PositionGetDouble(POSITION_TP));
+            double newSL = NormalizeDouble(ask + trailDist, digits);
+            // Modify only if SL needs to jump down by at least 15 points (anti-spam)
+            if(sl == 0.0 || newSL < sl - (15 * point))
+            {
+               bool ok = trade.PositionModify(t, newSL, PositionGetDouble(POSITION_TP));
+               if(!ok && InpDebugPrint) Print("Trailing SELL #", t, " failed: ", trade.ResultRetcodeDescription());
+            }
          }
       }
    }
