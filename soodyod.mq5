@@ -79,7 +79,7 @@ input int      InpTimerSeconds         = 2;          // Timer interval to retry 
 
 // Anti-sideway / risk guard
 input int      InpSidewayATRPeriod     = 14;         // ATR period for sideway filter (0 disable)
-input int      InpSidewayMinATRPoints  = 0;          // If ATR(points) < this => pause new pending (0 disable)
+input int      InpSidewayMinATRPoints  = 4500;       // If ATR(points) < this => pause new pending (0 disable)
 input double   InpMaxLotLimit          = 0.50;       // Hard cap/guard for next lot (Exness 100$)
 input bool     InpPauseOnMaxLot        = true;       // If next lot would exceed cap => stop placing new legs
 
