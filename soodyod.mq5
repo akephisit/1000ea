@@ -981,8 +981,10 @@ void ManageTrailingStop()
 }
 
 //------------------------- CORE LOGIC --------------------------------
-bool PlaceOppositeStop(ZZ_SIDE lastSide, double lots)
+bool PlaceOppositeStop(ZZ_SIDE lastSide, double lots, string reason="")
 {
+   string cmt = InpComment;
+   if(reason != "") cmt = cmt + "-" + reason;
    if(!IsTradeAllowedNow())
    {
       DPrint("Skip PlaceOppositeStop: market closed.");
@@ -1038,7 +1040,7 @@ bool PlaceOppositeStop(ZZ_SIDE lastSide, double lots)
          price = bid - (minDist + 2*_Point);
 
       price = NormalizeDouble(price, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
-      bool ok = trade.SellStop(lots, price, _Symbol, 0.0, 0.0, ORDER_TIME_GTC, 0, InpComment);
+      bool ok = trade.SellStop(lots, price, _Symbol, 0.0, 0.0, ORDER_TIME_GTC, 0, cmt);
       if(InpDebugPrint && !ok) Print("SellStop failed retcode=", trade.ResultRetcode(), " desc=", trade.ResultRetcodeDescription(), " err=", GetLastError());
       return ok;
    }
@@ -1062,7 +1064,7 @@ bool PlaceOppositeStop(ZZ_SIDE lastSide, double lots)
          price = ask + (minDist + 2*_Point);
 
       price = NormalizeDouble(price, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
-      bool ok = trade.BuyStop(lots, price, _Symbol, 0.0, 0.0, ORDER_TIME_GTC, 0, InpComment);
+      bool ok = trade.BuyStop(lots, price, _Symbol, 0.0, 0.0, ORDER_TIME_GTC, 0, cmt);
       if(InpDebugPrint && !ok) Print("BuyStop failed retcode=", trade.ResultRetcode(), " desc=", trade.ResultRetcodeDescription(), " err=", GetLastError());
       return ok;
    }
@@ -1123,8 +1125,8 @@ bool StartSequence()
    }
 
    bool ok = (startSide==SIDE_BUY)
-             ? trade.Buy(lot1, _Symbol, 0.0, 0.0, 0.0, InpComment)
-             : trade.Sell(lot1, _Symbol, 0.0, 0.0, 0.0, InpComment);
+             ? trade.Buy(lot1, _Symbol, 0.0, 0.0, 0.0, InpComment + "-StartBuy")
+             : trade.Sell(lot1, _Symbol, 0.0, 0.0, 0.0, InpComment + "-StartSell");
    if(!ok)
    {
       Print("Failed to open first ", (startSide==SIDE_BUY?"BUY":"SELL"), ". retcode=", trade.ResultRetcode(), " desc=", trade.ResultRetcodeDescription(), " err=", GetLastError());
@@ -1135,7 +1137,7 @@ bool StartSequence()
    gCycles = 1;
 
    gNextLot = GetFirstOppLot();
-   PlaceOppositeStop(gLastTriggered, gNextLot);
+   PlaceOppositeStop(gLastTriggered, gNextLot, "StartOpp");
 
    gStarted = true;
    SaveState();
@@ -1175,6 +1177,20 @@ void MaintainOppositePending()
       return;
    }
 
+   // 🚨 Race condition guard: if positions changed but OnTradeTransaction hasn't caught up, ABORT!
+   int currentPositions = CountPositionsByMagic();
+   if(currentPositions > gCycles)
+   {
+      if(InpDebugPrint) Print("⏸ Sync Wait: currentPositions(", currentPositions, ") > gCycles(", gCycles, ") -- Waiting for OnTradeTransaction");
+      return;
+   }
+   else if(currentPositions < gCycles && currentPositions > 0)
+   {
+      if(InpDebugPrint) Print("🔄 Desync: currentPositions(", currentPositions, ") < gCycles(", gCycles, "). Rebuilding state!");
+      RebuildFromExisting();
+      return;
+   }
+
    if(InpTxnCooldownMs > 0)
    {
       ulong now = (ulong)GetTickCount();
@@ -1203,16 +1219,23 @@ void MaintainOppositePending()
             double diffPts = (hasSellStop ? (MathAbs(sellP - want) / _Point) : (double)(thr + 1));
             if(!hasSellStop || diffPts >= (double)thr)
             {
-               if(hasSellStop) trade.OrderDelete(sellT);
+               if(hasSellStop)
+               {
+                  if(!trade.OrderDelete(sellT))
+                  {
+                     if(InpDebugPrint) Print("Failed to delete old SELL STOP (Freeze Level?) - Abortion reprice");
+                     return;
+                  }
+               }
                gLowerPrice = want;
                gUpperPrice = NormalizeDouble(PriceByPoints(gLowerPrice, GetCurrentStepPoints(), true), (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
-               PlaceOppositeStop(SIDE_BUY, gNextLot);
+               PlaceOppositeStop(SIDE_BUY, gNextLot, "RepriceBuy");
                SaveState();
                return;
             }
          }
       }
-      if(!hasSellStop) PlaceOppositeStop(SIDE_BUY, gNextLot);
+      if(!hasSellStop) PlaceOppositeStop(SIDE_BUY, gNextLot, "MaintBuy");
    }
    else if(gLastTriggered == SIDE_SELL)
    {
@@ -1227,16 +1250,23 @@ void MaintainOppositePending()
             double diffPts = (hasBuyStop ? (MathAbs(buyP - want) / _Point) : (double)(thr + 1));
             if(!hasBuyStop || diffPts >= (double)thr)
             {
-               if(hasBuyStop) trade.OrderDelete(buyT);
+               if(hasBuyStop)
+               {
+                  if(!trade.OrderDelete(buyT))
+                  {
+                     if(InpDebugPrint) Print("Failed to delete old BUY STOP (Freeze Level?) - Abortion reprice");
+                     return;
+                  }
+               }
                gUpperPrice = want;
                gLowerPrice = NormalizeDouble(PriceByPoints(gUpperPrice, GetCurrentStepPoints(), false), (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
-               PlaceOppositeStop(SIDE_SELL, gNextLot);
+               PlaceOppositeStop(SIDE_SELL, gNextLot, "RepriceSell");
                SaveState();
                return;
             }
          }
       }
-      if(!hasBuyStop) PlaceOppositeStop(SIDE_SELL, gNextLot);
+      if(!hasBuyStop) PlaceOppositeStop(SIDE_SELL, gNextLot, "MaintSell");
    }
 }
 
@@ -1658,7 +1688,7 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
    DeleteDuplicatePendings(ORDER_TYPE_BUY_STOP,  true);
    DeleteDuplicatePendings(ORDER_TYPE_SELL_STOP, true);
 
-   PlaceOppositeStop(gLastTriggered, gNextLot);
+   PlaceOppositeStop(gLastTriggered, gNextLot, "DealTrig");
    SaveState();
 }
 //+------------------------------------------------------------------+
