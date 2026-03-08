@@ -16,7 +16,7 @@ CTrade trade;
 //------------------------- INPUTS ----------------------------------
 // Core
 input bool     InpAutoStart            = true;       // Auto start when attached
-input double   InpStartLot             = 0.10;       // First BUY lot
+input double   InpStartLot             = 0.01;       // First BUY lot (Safe for $100)
 
 // ABCD (Structure-break) start direction using ZigZag pivots
 enum ABCD_START_MODE { ABCD_START_ALWAYS_BUY=0, ABCD_START_USE_ABCD_ELSE_BUY=1, ABCD_START_REQUIRE_ABCD=2 };
@@ -34,30 +34,30 @@ input int      InpZigZagBackstep       = 3;
 // Lot progression
 enum LOT_MODE { LOT_ADD=0, LOT_MUL=1 };
 input LOT_MODE InpLotMode              = LOT_ADD;    // Lot mode: ADD or MULTIPLY
-input double   InpLotAdd               = 0.10;       // ADD: +each leg (0.1->0.2->0.3...)
-input double   InpLotMultiplier        = 2.0;        // MUL: *each leg (0.1->0.2->0.4...)
+input double   InpLotAdd               = 0.01;       // ADD: +each leg (0.01->0.02->0.03...)
+input double   InpLotMultiplier        = 2.0;        // MUL: *each leg (0.01->0.02->0.04...)
 
 input double   InpFirstOppLot          = 0.00;       // First opposite lot override (0 = auto by mode)
-input int      InpStepPoints           = 300;        // Base distance between Upper/Lower (Points)
+input int      InpStepPoints           = 5000;       // Base distance between Upper/Lower (Exness Gold: 5000-8000 points)
 input int      InpMaxCycles            = 0;          // Max triggered legs (0=unlimited)
 
 // Auto ATR Distance (Dynamic Step)
 input bool     InpAutoATRStep          = true;       // Enable Auto ATR Step Distance
 input int      InpATRStepPeriod        = 14;         // ATR Period for Step
 input double   InpATRStepMultiplier    = 1.0;        // ATR Multiplier for Step
-input int      InpMinStepPoints        = 100;        // Minimum Step Points
-input int      InpMaxStepPoints        = 5000;       // Maximum Step Points (0 = disable limit)
+input int      InpMinStepPoints        = 3000;       // Minimum Step Points (Protect tight sideways)
+input int      InpMaxStepPoints        = 12000;      // Maximum Step Points (0 = disable limit)
 
 // Trailing Stop (When One-Sided)
 input bool     InpUseTrailing          = true;       // Enable Trailing Stop
-input int      InpTrailingStartPoints  = 200;        // Trailing Start (Points profit)
-input int      InpTrailingDistancePoints = 100;      // Trailing Distance (Points)
+input int      InpTrailingStartPoints  = 1500;       // Trailing Start (Points profit, ex. 1500 pts)
+input int      InpTrailingDistancePoints = 800;      // Trailing Distance (Points, ex. 800 pts)
 
 // Safety / Exit
-input bool     InpCloseAllOnProfit     = false;      // Close all when profit target hit
-input double   InpProfitTargetMoney    = 50.0;       // Profit target (account currency)
-input bool     InpCloseAllOnLoss       = false;      // Close all when loss limit hit
-input double   InpLossLimitMoney       = -200.0;     // Loss limit (negative)
+input bool     InpCloseAllOnProfit     = true;       // Close all when profit target hit
+input double   InpProfitTargetMoney    = 10.0;       // Profit target (10% of $100)
+input bool     InpCloseAllOnLoss       = true;       // Close all when loss limit hit
+input double   InpLossLimitMoney       = -50.0;      // Loss limit (-50% max DD)
 
 // Per-order optional SL/TP (points). 0 = not set
 input int      InpTP_Points            = 0;          // TakeProfit points for each position (0 disable)
@@ -80,7 +80,7 @@ input int      InpTimerSeconds         = 2;          // Timer interval to retry 
 // Anti-sideway / risk guard
 input int      InpSidewayATRPeriod     = 14;         // ATR period for sideway filter (0 disable)
 input int      InpSidewayMinATRPoints  = 0;          // If ATR(points) < this => pause new pending (0 disable)
-input double   InpMaxLotLimit          = 0.0;        // Hard cap/guard for next lot (0 disable)
+input double   InpMaxLotLimit          = 0.50;       // Hard cap/guard for next lot (Exness 100$)
 input bool     InpPauseOnMaxLot        = true;       // If next lot would exceed cap => stop placing new legs
 
 // Pending maintenance after restart / market reopen
