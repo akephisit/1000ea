@@ -1656,6 +1656,9 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
    if(dealMagic != InpMagic) return;
    if(dealSymbol != _Symbol) return;
 
+   long dealEntry = (long)HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
+   if(dealEntry != DEAL_ENTRY_IN) return;
+
    long dealType = (long)HistoryDealGetInteger(trans.deal, DEAL_TYPE);
    if(dealType != DEAL_TYPE_BUY && dealType != DEAL_TYPE_SELL) return;
 
@@ -1664,7 +1667,7 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
    double  vol     = HistoryDealGetDouble(trans.deal, DEAL_VOLUME);
 
    gLastTriggered = newSide;
-   gCycles++;
+   gCycles = CountPositionsByMagic();
 
    ApplySLTPForOpenedPosition(newSide, price);
 
