@@ -84,9 +84,9 @@ input double   InpMaxLotLimit          = 0.50;       // Hard cap/guard for next 
 input bool     InpPauseOnMaxLot        = true;       // If next lot would exceed cap => stop placing new legs
 
 // Pending maintenance after restart / market reopen
-input bool     InpFollowPriceForPending = false;     // If true, opposite pending is kept ~InpStepPoints away from current price
+input bool     InpFollowPriceForPending = true;      // If true, opposite pending is kept ~InpStepPoints away from current price
 input bool     InpRepricePendingOnNewBar = true;     // Throttle reprice to once per bar (PERIOD_CURRENT)
-input int      InpPendingRepriceThresholdPoints = 0; // Reprice if pending differs by this many points (0=auto: Step/5, min 10)
+input int      InpPendingRepriceThresholdPoints = 200; // Reprice if pending differs by this many points (0=auto: Step/5, min 10)
 
 //------------------------- STATE -----------------------------------
 enum ZZ_SIDE { SIDE_NONE=0, SIDE_BUY=1, SIDE_SELL=2 };
@@ -294,16 +294,16 @@ double DesiredOppositePendingPrice(const ZZ_SIDE lastSide)
 
    if(lastSide == SIDE_BUY)
    {
-      // Keep SELL STOP below current bid by StepPoints
-      double price = PriceByPoints(bid, stepPts, false);
+      // Keep SELL STOP below gUpperPrice by dynamic StepPoints
+      double price = PriceByPoints(gUpperPrice, stepPts, false);
       if((bid - price) < minDist)
          price = bid - (minDist + 2*_Point);
       return NormalizeDouble(price, digits);
    }
    else if(lastSide == SIDE_SELL)
    {
-      // Keep BUY STOP above current ask by StepPoints
-      double price = PriceByPoints(ask, stepPts, true);
+      // Keep BUY STOP above gLowerPrice by dynamic StepPoints
+      double price = PriceByPoints(gLowerPrice, stepPts, true);
       if((price - ask) < minDist)
          price = ask + (minDist + 2*_Point);
       return NormalizeDouble(price, digits);
@@ -927,7 +927,14 @@ void ManageTrailingStop()
    long spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
    double minDist = (stopsLevel > spread ? stopsLevel : spread) * point;
    
-   double trailDist = InpTrailingDistancePoints * point;
+   double safeDistancePts = InpTrailingDistancePoints;
+   // Safety check 1: Distance must be strictly less than Start (otherwise SL falls in loss territory)
+   if(safeDistancePts >= InpTrailingStartPoints)
+      safeDistancePts = InpTrailingStartPoints - 10;
+   
+   double trailDist = safeDistancePts * point;
+   
+   // Safety check 2: against tight stops level
    if(trailDist < minDist + (2 * point))
       trailDist = minDist + (5 * point); // Force distance to be safe from Invalid Parameters
    
@@ -1238,10 +1245,17 @@ bool RebuildFromExisting()
    int cnt = CountPositionsByMagic();
    if(cnt <= 0) return false;
 
+   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+
    // anchor upper from oldest BUY if any
-   datetime bestOld = 0;
-   bool foundBuy=false;
-   double buyPrice=0;
+   datetime bestOldBuy  = 0;
+   bool     foundBuy    = false;
+   double   buyPrice    = 0;
+
+   // anchor from oldest SELL if no BUY
+   datetime bestOldSell = 0;
+   bool     foundSell   = false;
+   double   sellPrice   = 0;
 
    for(int i=PositionsTotal()-1; i>=0; --i)
    {
@@ -1252,24 +1266,42 @@ bool RebuildFromExisting()
       if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
 
       long type = (long)PositionGetInteger(POSITION_TYPE);
-      if(type != POSITION_TYPE_BUY) continue;
-
       datetime tm = (datetime)PositionGetInteger(POSITION_TIME);
-      if(!foundBuy || tm < bestOld)
+      double   op = PositionGetDouble(POSITION_PRICE_OPEN);
+
+      if(type == POSITION_TYPE_BUY)
       {
-         bestOld = tm;
-         buyPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-         foundBuy=true;
+         if(!foundBuy || tm < bestOldBuy)
+         {
+            bestOldBuy = tm;
+            buyPrice   = op;
+            foundBuy   = true;
+         }
+      }
+      else if(type == POSITION_TYPE_SELL)
+      {
+         if(!foundSell || tm < bestOldSell)
+         {
+            bestOldSell = tm;
+            sellPrice   = op;
+            foundSell   = true;
+         }
       }
    }
 
    if(foundBuy)
-      gUpperPrice = NormalizeDouble(buyPrice, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
+      gUpperPrice = NormalizeDouble(buyPrice, digits);
+   else if(foundSell)
+   {
+      gUpperPrice = NormalizeDouble(PriceByPoints(sellPrice, GetCurrentStepPoints(), true), digits);
+      if(InpDebugPrint)
+         Print("RebuildFromExisting: no BUY found, anchoring Upper from oldest SELL ",
+               DoubleToString(sellPrice, digits), " + Step -> ", DoubleToString(gUpperPrice, digits));
+   }
    else
-      gUpperPrice = NormalizeDouble(SymbolInfoDouble(_Symbol, SYMBOL_BID), (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
+      gUpperPrice = NormalizeDouble(SymbolInfoDouble(_Symbol, SYMBOL_BID), digits);
 
-   gLowerPrice = NormalizeDouble(PriceByPoints(gUpperPrice, GetCurrentStepPoints(), false),
-                                 (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
+   gLowerPrice = NormalizeDouble(PriceByPoints(gUpperPrice, GetCurrentStepPoints(), false), digits);
 
    ZZ_SIDE lastS; double lastP,lastV;
    if(GetLastPosition(lastS,lastP,lastV))
